@@ -1,0 +1,6 @@
+# 내 컴퓨터에서 실행할 때 생기는 파일
+__pycache__/
+결과/
+*.pyc
+.DS_Store
+Thumbs.db
