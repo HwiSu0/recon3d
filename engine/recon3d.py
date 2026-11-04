@@ -440,6 +440,17 @@ def main():
         if st is not None:
             summ['truth_fit'] = summarize(model, st, N)
             summ['chi2_per_N_truth_path'] = summ['truth_fit']['chi2_per_N']
+    if cfg.get('thickness', True):      # 호스 안지름 추정 (실패해도 복원 결과는 그대로 저장)
+        print('호스 굵기 추정 중...', flush=True)
+        try:
+            import thickness
+            best_p = model.unpack(sols[0].x)
+            summ['thickness'] = thickness.estimate(cfg, tt, data, I, model, {k: best_p[k] for k in ('J', 'C') if k in best_p})
+            for pc in summ['thickness']['pieces']:
+                print(f"  {pc['name']}: 앞머리 속도 {pc['U']:.2f} cm/s, 안지름 {pc.get('d_mm', '-')} mm" if pc['resolved'] else f"  {pc['name']}: 판정 불가", flush=True)
+        except Exception as e:
+            print('  굵기 추정 실패:', e, flush=True)
+            summ['thickness'] = {'error': str(e)}
     out = cfg.get('out', f"recon_run{cfg['run']}")
     if os.path.dirname(out): os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump(summ, open(out + '.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)

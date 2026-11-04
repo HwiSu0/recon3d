@@ -28,21 +28,21 @@ function boot() {
 }
 
 async function start() {
-  say({ type: 'stage', stage: 'boot', text: '파이썬 실행 환경을 내려받는 중' });
+  say({ type: 'stage', stage: 'boot', text: '실행 환경 불러오는 중 (처음 1회 약 40 MB)' });
   let loadPyodide;
   try {
     ({ loadPyodide } = await import(PYODIDE_URL + 'pyodide.mjs'));
   } catch (e) {
     say({ type: 'log', text: String(e) });
-    throw new Error('실행 환경을 내려받지 못했어요. 인터넷 연결을 확인하고, 학교 망이라면 cdn.jsdelivr.net이 막혀 있지 않은지 확인하세요.');
+    throw new Error('실행 환경을 내려받지 못함. 인터넷 연결과 cdn.jsdelivr.net 차단 여부 확인');
   }
   const line = text => say({ type: 'log', text });
   py = await loadPyodide({ indexURL: PYODIDE_URL, stdout: line, stderr: line });
   await py.loadPackage(['numpy', 'scipy', 'pandas'], { messageCallback: () => {}, errorCallback: line });
   py.FS.mkdirTree('/app');
-  for (const name of ['recon3d.py', 'template.html']) {
+  for (const name of ['recon3d.py', 'thickness.py', 'template.html']) {
     const res = await fetch(new URL(`../engine/${name}`, self.location.href));
-    if (!res.ok) throw new Error(`engine/${name} 파일을 불러오지 못했어요 (HTTP ${res.status})`);
+    if (!res.ok) throw new Error(`engine/${name} 파일을 불러오지 못함 (HTTP ${res.status})`);
     py.FS.writeFile(`/app/${name}`, new Uint8Array(await res.arrayBuffer()));
   }
   await py.runPythonAsync(RUNNER);
@@ -56,7 +56,7 @@ function run(file, cfg) {
   try {
     const job = Object.assign({}, cfg, { csv: '/in/data.csv', out: '/out/result' });
     FS.writeFile('/out/config.json', JSON.stringify(job));
-    say({ type: 'stage', stage: 'run', text: '측정값을 읽는 중' });
+    say({ type: 'stage', stage: 'run', text: '데이터 읽는 중' });
     const result = JSON.parse(py.globals.get('run_recon')('/out/config.json'));
     if (!result.ok) { say({ type: 'failed', message: result.message, trace: result.trace }); return; }
     say({

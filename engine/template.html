@@ -6,107 +6,114 @@
 <title>통로 3D 복원</title>
 <style>
 :root{
-  --bg:#f4f3ef; --panel:#ffffff; --ink:#1d1d1b; --muted:#6b6a64; --line:#d9d7cf; --grid:#ecebe5;
-  --scene:#e9ebee; --b1:#2463c9; --b2:#d2691e; --b3:#2e8b57; --stem:#3b3a36; --truth:#2f9e57; --sensor:#7a3fb0;
-  --c0:#1d1d1b; --c1:#2463c9; --c2:#d2691e; --good:#2e8b57; --bad:#c2410c;
-  --label-bg:rgba(255,255,255,.88); --label-ink:#1d1d1b;
+  --bg:#fff; --panel:#fff; --ink:#1c1c1c; --muted:#767676; --line:#e3e3e3; --grid:#efefef;
+  --scene:#e8e8e8; --b1:#2463c9; --b2:#d2691e; --b3:#2e8b57; --stem:#3b3a36; --truth:#2f9e57; --sensor:#7a3fb0;
+  --c0:#1c1c1c; --c1:#2463c9; --c2:#d2691e; --good:#1c1c1c; --bad:#b3261e;
+  --label-bg:rgba(255,255,255,.85); --label-ink:#1c1c1c;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
-    --bg:#141413; --panel:#1f1f1d; --ink:#ecebe6; --muted:#a3a29b; --line:#3a3a36; --grid:#2a2a27;
-    --scene:#1c1d20; --b1:#6ea0ff; --b2:#f0954a; --b3:#5cc48c; --stem:#d6d4cc; --truth:#5cc48c; --sensor:#c08cf0;
-    --c0:#ecebe6; --c1:#6ea0ff; --c2:#f0954a; --good:#5cc48c; --bad:#f0954a;
-    --label-bg:rgba(30,30,28,.86); --label-ink:#ecebe6;
+    --bg:#161616; --panel:#161616; --ink:#e6e6e6; --muted:#939393; --line:#2e2e2e; --grid:#242424;
+    --scene:#1e1e1e; --b1:#6ea0ff; --b2:#f0954a; --b3:#5cc48c; --stem:#d6d4cc; --truth:#5cc48c; --sensor:#c08cf0;
+    --c0:#e6e6e6; --c1:#6ea0ff; --c2:#f0954a; --good:#e6e6e6; --bad:#f28b82;
+    --label-bg:rgba(24,24,24,.85); --label-ink:#e6e6e6;
   }
 }
 :root[data-theme="dark"]{
-  --bg:#141413; --panel:#1f1f1d; --ink:#ecebe6; --muted:#a3a29b; --line:#3a3a36; --grid:#2a2a27;
-  --scene:#1c1d20; --b1:#6ea0ff; --b2:#f0954a; --b3:#5cc48c; --stem:#d6d4cc; --truth:#5cc48c; --sensor:#c08cf0;
-  --c0:#ecebe6; --c1:#6ea0ff; --c2:#f0954a; --good:#5cc48c; --bad:#f0954a;
-  --label-bg:rgba(30,30,28,.86); --label-ink:#ecebe6;
+  --bg:#161616; --panel:#161616; --ink:#e6e6e6; --muted:#939393; --line:#2e2e2e; --grid:#242424;
+  --scene:#1e1e1e; --b1:#6ea0ff; --b2:#f0954a; --b3:#5cc48c; --stem:#d6d4cc; --truth:#5cc48c; --sensor:#c08cf0;
+  --c0:#e6e6e6; --c1:#6ea0ff; --c2:#f0954a; --good:#e6e6e6; --bad:#f28b82;
+  --label-bg:rgba(24,24,24,.85); --label-ink:#e6e6e6;
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif}
-.wrap{max-width:1280px;margin:0 auto;padding:20px 16px 48px}
-h1{font-size:22px;margin:0 0 4px;letter-spacing:-.01em}
-.sub{color:var(--muted);margin:0 0 16px;font-size:14px}
-.grid{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(0,1fr);gap:16px}
-@media (max-width:900px){.grid{grid-template-columns:1fr}}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
-.card h2{font-size:15px;margin:0 0 10px}
-#stage{position:relative;width:100%;aspect-ratio:4/3;border-radius:8px;overflow:hidden;background:var(--scene);touch-action:none;cursor:grab}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif}
+h1{margin:0;padding:10px 12px;font-size:13px;font-weight:600}
+h2{margin:0 0 8px;font-size:12px;font-weight:600}
+h3{margin:0 0 2px;font-size:12px;font-weight:600}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 290px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+.side{padding:6px 12px 12px;border-left:1px solid var(--line)}
+@media (max-width:760px){.side{border-left:0;border-top:1px solid var(--line)}}
+section{padding:12px;border-bottom:1px solid var(--line)}
+section:last-child{border-bottom:0}
+#stage{position:relative;width:100%;height:68vh;min-height:320px;overflow:hidden;background:var(--scene);touch-action:none;cursor:grab}
 #stage:active{cursor:grabbing}
 #gl{width:100%;height:100%;display:block}
 #labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
-.lb{position:absolute;transform:translate(-50%,-140%);white-space:nowrap;font-size:11.5px;line-height:1.3;padding:2px 6px;border-radius:6px;
-    background:var(--label-bg);color:var(--label-ink);border:1px solid var(--line)}
-.lb.key{font-weight:600;border-color:currentColor}
+.lb{position:absolute;transform:translate(-50%,-140%);white-space:nowrap;font-size:11px;line-height:1.3;padding:1px 4px;border-radius:2px;background:var(--label-bg);color:var(--label-ink)}
+.lb.key{font-weight:600}
 .lb small{color:var(--muted);font-weight:400}
 #nogl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);text-align:center;padding:20px}
 #view{width:100%;height:auto;aspect-ratio:4/3;display:block}
 #view[hidden]{display:none}
-.ctrl{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}
-button{font:inherit;font-size:13px;background:transparent;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer}
-button:hover{border-color:var(--muted)}
-label{font-size:13px;color:var(--muted);display:inline-flex;gap:4px;align-items:center;margin-left:4px}
-.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:13px;color:var(--muted);margin-top:8px}
-.legend span{display:inline-flex;align-items:center;gap:6px}
-.sw{display:inline-block;width:22px;height:8px;border-radius:4px}
-table{width:100%;border-collapse:collapse;font-size:14px}
-td{padding:6px 4px;border-bottom:1px solid var(--grid);vertical-align:top}
-td:first-child{color:var(--muted);width:44%}
+.ctrl{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;padding:6px 12px;border-top:1px solid var(--line)}
+.grp{display:inline-flex}
+.grp button{margin-left:-1px}
+.grp button:first-child{margin-left:0}
+button{height:24px;padding:0 8px;font:inherit;font-size:12px;background:transparent;color:var(--ink);border:1px solid var(--line);border-radius:0;cursor:pointer}
+button:hover{background:var(--grid)}
+label{font-size:12px;color:var(--muted);display:inline-flex;gap:4px;align-items:center}
+label input{margin:0;accent-color:var(--ink)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--muted)}
+.side .legend{margin-top:10px}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.sw{display:inline-block;width:14px;height:2px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+td{padding:4px 0;border-bottom:1px solid var(--grid);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td:first-child{color:var(--muted);padding-right:8px}
 td.num{font-variant-numeric:tabular-nums}
 .meta{font-size:12px;color:var(--muted)}
-.note{font-size:13px;color:var(--muted);margin-top:10px}
-.traces{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}
-@media (max-width:700px){.traces{grid-template-columns:1fr}}
+.note{margin:6px 0 0;font-size:12px;color:var(--muted)}
+.traces{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-top:8px}
 .tr svg{width:100%;height:auto;display:block}
-.tr h3{font-size:14px;margin:0 0 4px}
 .good{color:var(--good)} .bad{color:var(--bad)}
+.thick{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:20px;align-items:start}
+@media (max-width:760px){.thick{grid-template-columns:1fr}}
+#thickTable th{font-weight:400;color:var(--muted);text-align:left;padding:0 8px 3px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+#thickTable td{padding-right:8px;white-space:nowrap}
+#thickTable td:first-child{white-space:normal}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1 id="title"></h1>
-  <p class="sub" id="sub"></p>
   <div class="grid">
-    <div class="card">
-      <h2>복원된 통로 (끌어서 돌리기 · 휠로 확대 · 오른쪽 끌기로 이동)</h2>
+    <div>
       <div id="stage"><canvas id="gl"></canvas><div id="labels"></div><div id="nogl" hidden></div></div>
       <svg id="view" viewBox="0 0 640 480" hidden role="img" aria-label="복원된 통로 그림"></svg>
       <div class="ctrl">
-        <button data-v="iso">비스듬히</button>
-        <button data-v="top">위에서</button>
-        <button data-v="front">앞(S3 쪽)에서</button>
-        <button data-v="side">입구 쪽에서</button>
-        <button data-v="out">출구 쪽에서</button>
-        <button data-f="J">분기점 확대</button>
-        <button data-f="in">입구 구멍 확대</button>
-        <button data-f="out">출구 구멍 확대</button>
+        <span class="grp"><button data-v="iso">기본</button><button data-v="top">위</button><button data-v="front">앞</button><button data-v="side">입구 쪽</button><button data-v="out">출구 쪽</button></span>
+        <span class="grp"><button data-f="J">분기점</button><button data-f="in">입구</button><button data-f="out">출구</button></span>
         <label><input type="checkbox" id="tBox" checked>상자</label>
         <label><input type="checkbox" id="tCoil">코일</label>
         <label><input type="checkbox" id="tTruth" checked>실제 경로</label>
         <label><input type="checkbox" id="tAlt" checked>다른 후보</label>
         <label><input type="checkbox" id="tLab" checked>이름표</label>
       </div>
+    </div>
+    <div class="side">
+      <table id="sum"></table>
       <div class="legend" id="legend"></div>
     </div>
-    <div class="card">
-      <h2>결과 요약</h2>
-      <table id="sum"></table>
-      <p class="note" id="fitnote"></p>
-    </div>
   </div>
-  <div class="card" style="margin-top:16px">
-    <h2>센서별 측정값과 모델 비교 (μT)</h2>
+  <section id="thickCard" hidden>
+    <h2>호스 내경</h2>
+    <div class="thick">
+      <div><table id="thickTable"></table><p class="note" id="thickNote"></p></div>
+      <div class="tr" id="thickPlot"></div>
+    </div>
+  </section>
+  <section>
+    <h2>센서별 ΔB (μT)</h2>
     <div class="legend">
-      <span><i class="sw" style="background:var(--c0)"></i>코일 자기장 방향 성분</span>
-      <span><i class="sw" style="background:var(--c1)"></i>수직 성분 1</span>
-      <span><i class="sw" style="background:var(--c2)"></i>수직 성분 2</span>
-      <span>옅은 선 = 측정, 진한 선 = 모델</span>
+      <span><i class="sw" style="background:var(--c0)"></i>코일 방향</span>
+      <span><i class="sw" style="background:var(--c1)"></i>수직 1</span>
+      <span><i class="sw" style="background:var(--c2)"></i>수직 2</span>
+      <span>옅은 선: 측정, 진한 선: 모델</span>
     </div>
     <div class="traces" id="traces"></div>
-  </div>
+  </section>
 </div>
 <script>
 const D = __DATA__;
@@ -117,44 +124,36 @@ const G = D.geom || {};
 const S = D.summary, nb = S.U.length, names = D.outlet_names || [];
 const hoseMM = G.hose_mm || { stem: 3, branches: Array(nb).fill(3) };
 document.getElementById('title').textContent = D.title;
-document.getElementById('sub').textContent = '좌표 (a, b, c) cm — a: 입구면에서 출구 쪽, b: 앞면(S3 쪽)에서 안쪽, c: 탁자에서 높이';
 
 // ---------- 추정 굵기 (lambda 비로) ----------
 const estD = S.lam.map(l => (S.lam0 > 1e-6 && l > 0) ? hoseMM.stem * Math.sqrt(l / S.lam0) : null);
 
 // ---------- summary ----------
 const rows = [];
-rows.push(['맞춤 정도 χ²/N', `${S.chi2_per_N.toFixed(2)} <span class="meta">(철 없다고 볼 때 ${S.chi2_per_N_no_iron_model.toFixed(2)})</span>`]);
-if (S.J) rows.push(['분기점 J', fp(S.J)]);
-S.C.forEach((c, k) => rows.push([`${names[k] || '갈래' + (k + 1)} 꺾이는 점`, fp(c)]));
-if (nb >= 2) rows.push(['입구→분기점 길이', `${f1(S.stem_len_cm)} cm`]);
-S.branch_len_cm.forEach((L, k) => rows.push([`${names[k] || '갈래' + (k + 1)} 상자 안 길이`, `${f1(L)} cm`]));
-rows.push(['앞머리 속도 (입구 쪽)', `${S.U0.toFixed(2)} cm/s`]);
-S.U.forEach((u, k) => rows.push([`${names[k] || '갈래' + (k + 1)} 속도`, `${u.toFixed(2)} cm/s`]));
-rows.push(['상자 입구 도착 시각', `${S.t0.toFixed(1)} s`]);
-rows.push(['λ (입구 / 갈래)', [S.lam0, ...S.lam].map(x => x.toFixed(3)).join(' / ')]);
-estD.forEach((d, k) => { if (d !== null && nb >= 2) rows.push([`${names[k] || '갈래' + (k + 1)} 굵기 (설정 / λ로 추정)`, `${hoseMM.branches[k]} mm / ${d.toFixed(1)} mm`]); });
-if (S.flow_split) rows.push(['유량 나뉨', S.flow_split.map(x => (x * 100).toFixed(0) + '%').join(' : ')]);
+rows.push(['χ²/N', `${S.chi2_per_N.toFixed(2)} <span class="meta">(철 없음 ${S.chi2_per_N_no_iron_model.toFixed(2)})</span>`]);
+if (S.J) rows.push(['분기점', fp(S.J)]);
+S.C.forEach((c, k) => rows.push([`꺾임 ${names[k] || k + 1}`, fp(c)]));
+if (nb >= 2) rows.push(['입구→분기점', `${f1(S.stem_len_cm)} cm`]);
+S.branch_len_cm.forEach((L, k) => rows.push([`길이 ${names[k] || k + 1}`, `${f1(L)} cm`]));
+rows.push(['속도 입구 쪽', `${S.U0.toFixed(2)} cm/s`]);
+S.U.forEach((u, k) => rows.push([`속도 ${names[k] || k + 1}`, `${u.toFixed(2)} cm/s`]));
+rows.push(['입구 도착', `${S.t0.toFixed(1)} s`]);
+rows.push(['λ', [S.lam0, ...S.lam].map(x => x.toFixed(3)).join(' / ')]);
+if (S.flow_split) rows.push(['유량비', S.flow_split.map(x => (x * 100).toFixed(0) + '%').join(' : ')]);
 if (S.truth_error_cm) {
   const lab = nb >= 2 ? ['입구→분기점', ...names] : [names[0] || '통로'];
-  S.truth_error_cm.forEach((e, i) => rows.push([`실제와 차이: ${lab[i] || i}`,
-    `<span class="${e.max <= 1 ? 'good' : 'bad'}">평균 ${e.mean.toFixed(2)} cm · 최대 ${e.max.toFixed(2)} cm</span>`]));
+  S.truth_error_cm.forEach((e, i) => rows.push([`경로 오차 ${lab[i] || i}`, `평균 ${e.mean.toFixed(2)}, 최대 ${e.max.toFixed(2)} cm`]));
 }
-if (S.chi2_per_N_truth_path) rows.push(['실제 경로로 맞출 때 χ²/N', S.chi2_per_N_truth_path.toFixed(2)]);
+if (S.chi2_per_N_truth_path) rows.push(['χ²/N 실제 경로', S.chi2_per_N_truth_path.toFixed(2)]);
 document.getElementById('sum').innerHTML = rows.map(r => `<tr><td>${r[0]}</td><td class="num">${r[1]}</td></tr>`).join('');
-const imp = S.chi2_per_N_no_iron_model / Math.max(S.chi2_per_N, 1e-9);
-document.getElementById('fitnote').textContent =
-  `χ²/N가 1에 가까울수록 측정 잡음 수준까지 맞췄다는 뜻이에요. 철이 없다고 볼 때보다 ${imp.toFixed(1)}배 잘 맞아요. ` +
-  (D.alt.length ? `거의 비슷하게 맞는 다른 후보 ${D.alt.length}개를 옅은 가는 관으로 같이 그렸어요 — 후보끼리 차이가 큰 곳이 불확실한 곳이에요.` : '비슷하게 맞는 다른 후보는 없었어요.');
-
 // ---------- legend ----------
 const brCol = ['--b1', '--b2', '--b3'];
 const lg = [];
-if (nb >= 2) lg.push(['--stem', '입구 → 분기점']);
-for (let k = 0; k < nb; k++) lg.push([nb >= 2 ? brCol[k % 3] : '--b1', `복원: ${names[k] || '갈래' + (k + 1)}`]);
-if (D.truth) lg.push(['--truth', '실제 경로 (점선 관)']);
-document.getElementById('legend').innerHTML = lg.map(([c, s]) => `<span><i class="sw" style="background:var(${c})"></i>${s}</span>`).join('') +
-  `<span><i class="sw" style="background:#222;width:12px"></i>호스 속 철 현탁액</span><span><i class="sw" style="background:#f0b429;width:12px"></i>분기점 J (Y자 연결관)</span><span><i class="sw" style="background:#e8a33a;width:12px"></i>굵기 바뀌는 이음관</span><span>C1, C2 = 꺾이는 점 (고리 표시)</span><span><i class="sw" style="background:var(--sensor);width:12px"></i>센서</span>`;
+if (nb >= 2) lg.push(['--stem', '입구→분기점']);
+for (let k = 0; k < nb; k++) lg.push([nb >= 2 ? brCol[k % 3] : '--b1', names[k] || `갈래${k + 1}`]);
+if (D.truth) lg.push(['--truth', '실제 경로']);
+document.getElementById('legend').innerHTML = lg.map(([c, t]) => `<span><i class="sw" style="background:var(${c})"></i>${t}</span>`).join('');
+if (nb < 2) document.querySelector('[data-f="J"]').textContent = '꺾임';
 
 // ---------- vector helpers ----------
 const V3 = {
@@ -553,7 +552,7 @@ function startFallback() {
   D.best.forEach((pl, i) => line(pl, { stroke: css(nb >= 2 ? cols[i] : '--b1'), 'stroke-width': 4 }));
   if (D.truth) D.truth.forEach(pl => line(pl, { stroke: css('--truth'), 'stroke-width': 2, 'stroke-dasharray': '6 4' }));
   Object.entries(D.sensors).forEach(([k, p]) => { const q = pr(p); const t = el('text', { x: q[0] + 6, y: q[1] - 6, fill: css('--sensor'), 'font-size': 13 }, svg); t.textContent = k; });
-  const ng = document.createElement('p'); ng.className = 'note'; ng.textContent = '이 컴퓨터에서는 3D 그래픽(WebGL)을 쓸 수 없어서 간단한 선 그림으로 보여 줘요.'; svg.after(ng);
+  const ng = document.createElement('p'); ng.className = 'note'; ng.textContent = 'WebGL 사용 불가: 선 그림으로 표시'; svg.after(ng);
 }
 
 // ---------- traces ----------
@@ -564,7 +563,7 @@ function drawTraces() {
   const t = D.t, w = 520, h = 210, L = 44, R = 10, T = 10, Bm = 28;
   Object.entries(D.traces).forEach(([k, tr]) => {
     const div = document.createElement('div'); div.className = 'tr';
-    div.innerHTML = `<h3>${k}</h3><div class="meta">잡음 약 ${tr.noise} μT (0.5초 평균)</div>`;
+    div.innerHTML = `<h3>${k} <span class="meta">σ ${tr.noise}</span></h3>`;
     const s = el('svg', { viewBox: `0 0 ${w} ${h}`, role: 'img', 'aria-label': `${k} 측정과 모델` });
     const vals = [...tr.meas.flat(), ...tr.model.flat()].filter(v => v !== null);
     let ymin = Math.min(0, ...vals), ymax = Math.max(0, ...vals); const pad = (ymax - ymin) * 0.08 || 0.2; ymin -= pad; ymax += pad;
@@ -587,6 +586,51 @@ function drawTraces() {
   });
 }
 drawTraces();
+
+// ---------- 호스 안지름 추정 ----------
+function drawThickness() {
+  const T = S.thickness; if (!T) return;
+  const card = document.getElementById('thickCard'), table = document.getElementById('thickTable'), note = document.getElementById('thickNote');
+  card.hidden = false;
+  if (T.error) { note.textContent = `추정 실패: ${T.error}`; return; }
+  const cell = v => `<td class="num">${v}</td>`;
+  const head = `<tr><th scope="col"></th><th scope="col">U (cm/s)</th><th scope="col">Q (mL/s)</th><th scope="col">내경 (mm)</th><th scope="col">설정</th></tr>`;
+  const body = T.pieces.map(p => {
+    const speed = p.resolved ? `${p.U.toFixed(2)} ± ${p.U_err.toFixed(2)}` : '<span class="bad">판정 불가</span>';
+    const d = p.d_mm !== undefined ? `<b>${p.d_mm.toFixed(2)} ± ${p.d_err_mm.toFixed(2)}</b>` : '-';
+    return `<tr><td>${p.name}</td>${cell(speed)}${cell(p.Q_mL_s ? p.Q_mL_s.toFixed(3) : '-')}${cell(d)}${cell(p.d_set_mm)}</tr>`;
+  }).join('');
+  const ratio = (T.from_signal_ratio || []).map(r => `<tr><td>${r.name} λ비</td>${cell('')}${cell('')}${cell(r.resolved ? `${r.d_mm.toFixed(2)} ± ${r.d_err_mm.toFixed(2)}` : '<span class="bad">판정 불가</span>')}${cell('')}</tr>`).join('');
+  table.innerHTML = head + body + ratio;
+  note.textContent = `d = 2√(Q/πU), 맞춤 구간 ${T.window[0]}~${T.window[1]} s, ${T.path}, Q 오차 ${Math.round(T.flow_rel_err * 100)}%`;
+
+  // 속도별 맞춤 그래프
+  const NS = 'http://www.w3.org/2000/svg', w = 520, h = 230, L = 44, R = 10, Tp = 10, Bm = 34;
+  const el = (t, a, p) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); if (p) p.appendChild(e); return e; };
+  const box = document.getElementById('thickPlot');
+  box.innerHTML = '<h3>속도별 Δχ² <span class="meta">점선 3σ</span></h3>';
+  const s = el('svg', { viewBox: `0 0 ${w} ${h}`, role: 'img', 'aria-label': '앞머리 속도에 따른 chi 제곱 변화' }, box);
+  const us = T.pieces[0].profile.U, x0 = Math.log(us[0]), x1 = Math.log(us[us.length - 1]);
+  const peak = Math.max(30, ...T.pieces.flatMap(p => p.profile.dchi2));
+  const X = u => L + (Math.log(u) - x0) / (x1 - x0) * (w - L - R), Y = v => Tp + (1 - Math.sqrt(Math.max(v, 0) / peak)) * (h - Tp - Bm);
+  [0.3, 1, 3, 10, 30].forEach(u => {
+    el('line', { x1: X(u), x2: X(u), y1: Tp, y2: h - Bm, stroke: css('--grid'), 'stroke-width': 1 }, s);
+    const t = el('text', { x: X(u), y: h - Bm + 16, 'text-anchor': 'middle', 'font-size': 11, fill: css('--muted') }, s); t.textContent = u;
+  });
+  const xl = el('text', { x: (L + w - R) / 2, y: h - 4, 'text-anchor': 'middle', 'font-size': 11, fill: css('--muted') }, s); xl.textContent = 'U (cm/s)';
+  [0, 9, 100, 400].filter(v => v <= peak).forEach(v => {
+    const t = el('text', { x: L - 6, y: Y(v) + 4, 'text-anchor': 'end', 'font-size': 11, fill: css('--muted') }, s); t.textContent = v;
+  });
+  el('line', { x1: L, x2: w - R, y1: Y(9), y2: Y(9), stroke: css('--muted'), 'stroke-width': 1, 'stroke-dasharray': '5 4' }, s);
+  const cols = T.pieces.length === 1 ? ['--b1'] : ['--stem', '--b1', '--b2', '--b3'];
+  T.pieces.forEach((p, i) => {
+    const col = css(cols[i % cols.length]);
+    const d = p.profile.U.map((u, j) => (j ? 'L' : 'M') + X(u).toFixed(1) + ' ' + Y(p.profile.dchi2[j]).toFixed(1)).join('');
+    el('path', { d, fill: 'none', stroke: col, 'stroke-width': 2.2 }, s);
+    if (p.resolved) el('circle', { cx: X(p.U), cy: Y(0), r: 4, fill: col }, s);
+  });
+}
+drawThickness();
 </script>
 </body>
 </html>

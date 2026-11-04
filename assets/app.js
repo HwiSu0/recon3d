@@ -1,5 +1,3 @@
-import { drawFilings } from './filings.js';
-
 const $ = id => document.getElementById(id);
 const clone = o => JSON.parse(JSON.stringify(o));
 
@@ -10,12 +8,13 @@ const state = {
   truth: null,       // 체크를 껐다 켜도 되돌릴 수 있게 보관
   worker: null,
   running: false,
-  jobRun: null,      // 지금 계산 중인 Run 번호
+  job: null,         // 지금 계산 중인 { run, title, csv }
   presets: [],
-  result: null,      // { name, html, json }
+  result: null,      // 화면에 보이는 결과 { id, run, title, csv, time, html, json }
+  results: [],       // 저장된 결과, 최신순
 };
 
-/* ---------- CSV 머리글 읽기 ---------- */
+/* ---------- CSV 머리글 ---------- */
 function parseHeader(line) {
   const cols = []; let cur = '', quoted = false;
   for (const ch of line) {
@@ -44,8 +43,7 @@ async function readColumns(file) {
 
 function runLabel(map) {
   const runs = [...map.keys()];
-  if (runs.length === 1) return `Run #${runs[0]}`;
-  return `Run #${Math.min(...runs)}~#${Math.max(...runs)}`;
+  return runs.length === 1 ? `Run #${runs[0]}` : `Run #${Math.min(...runs)}~#${Math.max(...runs)}`;
 }
 
 /* ---------- 측정 파일 ---------- */
@@ -54,66 +52,61 @@ async function setFile(file) {
   const columns = await readColumns(file);
   if (!columns.size) {
     state.file = null; state.columns = null;
-    $('drop').classList.remove('loaded');
-    $('dropText').textContent = 'Capstone에서 내보낸 CSV를 끌어다 놓거나 눌러서 고르세요';
-    $('fileInfo').hidden = true;
-    showError(`${file.name}에서 "Run #" 열을 찾지 못했어요. Capstone의 File > Export Data로 내보낸 CSV를 고르세요.`);
+    $('fileInfo').textContent = '파일 없음';
+    showError(`${file.name}: Run 열 없음. Capstone에서 내보낸 CSV 필요`);
     fillRun(); validate();
     return;
   }
   state.file = file;
   state.columns = columns;
-  $('drop').classList.add('loaded');
-  $('dropText').textContent = file.name;
-  $('fileInfo').hidden = false;
-  $('fileInfo').textContent = `${(file.size / 1e6).toFixed(1)} MB, ${runLabel(columns)} 들어 있어요.`;
+  $('fileInfo').textContent = `${file.name} (${runLabel(columns)})`;
+  $('fileInfo').title = `${file.name}, ${(file.size / 1e6).toFixed(1)} MB`;
   if (!columns.has(state.cfg.run)) {
-    const missing = state.cfg.run;
     const match = state.presets.find(p => columns.has(Number(p.id.slice(1))));
     if (match) await usePreset(match.id);
     else state.cfg.run = Math.max(...columns.keys());
-    $('fileInfo').textContent += ` 파일에 없는 Run #${missing} 대신 Run #${state.cfg.run} 설정으로 바꿨어요. 실험 조건이 맞는지 확인하세요.`;
   }
   fillRun(); sync();
   startWorker();
 }
 
-function wireDrop() {
-  const drop = $('drop');
-  $('csvInput').addEventListener('change', e => { if (e.target.files[0]) setFile(e.target.files[0]); });
-  for (const ev of ['dragenter', 'dragover']) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); });
-  for (const ev of ['dragleave', 'drop']) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); });
-  drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) setFile(f); });
+function wireFile() {
+  const panel = document.querySelector('aside');
+  $('openCsv').addEventListener('click', () => $('csvInput').click());
+  $('csvInput').addEventListener('change', e => { if (e.target.files[0]) setFile(e.target.files[0]); e.target.value = ''; });
+  for (const ev of ['dragenter', 'dragover']) document.addEventListener(ev, e => { e.preventDefault(); panel.classList.add('over'); });
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) panel.classList.remove('over'); });
+  document.addEventListener('drop', e => {
+    e.preventDefault();
+    panel.classList.remove('over');
+    const f = e.dataTransfer.files[0];
+    if (f) setFile(f);
+  });
 }
 
-async function loadSample(id) {
-  const res = await fetch(`samples/run${id.slice(1)}.csv`);
-  if (!res.ok) { showError('예제 파일을 불러오지 못했어요.'); return; }
-  const blob = await res.blob();
-  await usePreset(id);
-  await setFile(new File([blob], `run${id.slice(1)}.csv`, { type: 'text/csv' }));
-}
-
-/* ---------- 설정 불러오기 ---------- */
+/* ---------- 설정 ---------- */
 async function usePreset(id) {
   const res = await fetch(`configs/config_${id}.json`);
-  if (!res.ok) { showError('설정 파일을 불러오지 못했어요.'); return; }
+  if (!res.ok) { showError('설정 파일을 불러오지 못함'); return; }
   setConfig(await res.json());
   $('preset').value = id;
 }
 
-function setConfig(cfg) {
-  state.cfg = cfg;
-  state.truth = cfg.truth ? clone(cfg.truth) : null;
+function normalize(cfg) {
   if (!cfg.hose_mm) cfg.hose_mm = { stem: 3, branches: cfg.outlets.map(() => 3) };
   if (!cfg.outlet_names) cfg.outlet_names = cfg.outlets.map((_, i) => `출구${i + 1}`);
+  return cfg;
+}
+
+function setConfig(cfg) {
+  state.cfg = normalize(cfg);
+  state.truth = cfg.truth ? clone(cfg.truth) : null;
   fillForm();
   $('cfgError').hidden = true;
   $('cfgText').value = JSON.stringify(cfg, null, 2);
   validate();
 }
 
-/* ---------- 설정 -> 화면 ---------- */
 const val = v => (v === undefined || v === null ? '' : v);
 const toNum = s => { const n = parseFloat(s); return Number.isFinite(n) ? n : null; };
 
@@ -121,8 +114,8 @@ function fillRun() {
   const select = $('fRunSel'), input = $('fRun'), run = state.cfg.run;
   if (state.columns) {
     const runs = [...state.columns.keys()].sort((a, b) => b - a);
-    select.replaceChildren(...runs.map(r => new Option(`Run #${r}`, r)));
-    if (!state.columns.has(run)) select.prepend(new Option(`Run #${run} (이 파일에 없음)`, run));
+    select.replaceChildren(...runs.map(r => new Option(`#${r}`, r)));
+    if (!state.columns.has(run)) select.prepend(new Option(`#${run} (파일에 없음)`, run));
     select.value = run;
   }
   select.hidden = !state.columns;
@@ -132,16 +125,13 @@ function fillRun() {
 
 function fillForm() {
   const c = state.cfg;
-  $('fTitle').value = val(c.title);
   $('fFront').value = val(c.t_front_guess);
   $('fBase0').value = val(c.baseline && c.baseline[0]); $('fBase1').value = val(c.baseline && c.baseline[1]);
   $('fWin0').value = val(c.t_window && c.t_window[0]); $('fWin1').value = val(c.t_window && c.t_window[1]);
   $('fUp').value = val(c.upstream_len); $('fOut').value = val(c.outlet_len);
   fillRun(); fillSensors(); fillPorts();
-  const hasTruth = !!state.truth;
-  $('fTruth').disabled = !hasTruth;
+  $('fTruth').disabled = !state.truth;
   $('fTruth').checked = !!c.truth;
-  $('truthNote').textContent = hasTruth ? '블라인드 시험이면 끄세요' : '설정 JSON에 truth가 있을 때 쓸 수 있어요';
 }
 
 function maskText(ranges) { return (ranges || []).map(r => r.join('-')).join(', '); }
@@ -183,19 +173,29 @@ function fillSensors() {
   }
 }
 
+function setFlow(k, v) {
+  const c = state.cfg;
+  const flows = c.outlets.map((_, i) => (c.flow_mL_s && c.flow_mL_s[i] !== undefined ? c.flow_mL_s[i] : null));
+  flows[k] = v;
+  if (flows.some(q => q !== null)) c.flow_mL_s = flows; else delete c.flow_mL_s;
+}
+
 function fillPorts() {
   const c = state.cfg, body = $('portTable').tBodies[0];
   body.replaceChildren();
   const inlet = body.insertRow();
   inlet.insertCell().textContent = '입구';
   ['a', 'b', 'c'].forEach((axis, i) => cell(inlet, numInput(c.inlet[i], `입구 ${axis}`, v => { c.inlet[i] = v; })));
-  cell(inlet, numInput(c.hose_mm.stem, '입구 쪽 호스 안지름', v => { c.hose_mm.stem = v; }));
-  inlet.insertCell();
+  cell(inlet, numInput(c.hose_mm.stem, '입구 쪽 호스 내경', v => { c.hose_mm.stem = v; }));
+  inlet.insertCell(); inlet.insertCell();
   c.outlets.forEach((port, k) => {
     const row = body.insertRow();
     cell(row, textInput(c.outlet_names[k], `출구 ${k + 1} 이름`, v => { c.outlet_names[k] = v; }));
     ['a', 'b', 'c'].forEach((axis, i) => cell(row, numInput(port[i], `출구 ${k + 1} ${axis}`, v => { port[i] = v; })));
-    cell(row, numInput(c.hose_mm.branches[k], `출구 ${k + 1} 호스 안지름`, v => { c.hose_mm.branches[k] = v; }));
+    cell(row, numInput(c.hose_mm.branches[k], `출구 ${k + 1} 호스 내경`, v => { c.hose_mm.branches[k] = v; }));
+    const flow = numInput(c.flow_mL_s ? c.flow_mL_s[k] : null, `출구 ${k + 1} 유량`, v => setFlow(k, v));
+    flow.min = '0';
+    cell(row, flow);
     const td = row.insertCell();
     if (c.outlets.length > 1) {
       const del = document.createElement('button');
@@ -203,6 +203,7 @@ function fillPorts() {
       del.setAttribute('aria-label', `출구 ${k + 1} 삭제`);
       del.addEventListener('click', () => {
         c.outlets.splice(k, 1); c.outlet_names.splice(k, 1); c.hose_mm.branches.splice(k, 1);
+        if (c.flow_mL_s) c.flow_mL_s.splice(k, 1);
         fillPorts(); sync();
       });
       td.append(del);
@@ -213,15 +214,14 @@ function fillPorts() {
 function wireFields() {
   const c = () => state.cfg;
   const bind = (id, apply) => $(id).addEventListener('input', e => { apply(e.target.value); sync(); });
-  bind('fTitle', v => { c().title = v; });
+  const optional = (key, v) => { const n = toNum(v); if (n === null) delete c()[key]; else c()[key] = n; };
   bind('fRun', v => { c().run = toNum(v); });
   $('fRunSel').addEventListener('change', e => { c().run = Number(e.target.value); fillRun(); sync(); });
-  bind('fFront', v => { const n = toNum(v); if (n === null) delete c().t_front_guess; else c().t_front_guess = n; });
+  bind('fFront', v => optional('t_front_guess', v));
   bind('fBase0', v => { c().baseline = [toNum(v), c().baseline ? c().baseline[1] : null]; });
   bind('fBase1', v => { c().baseline = [c().baseline ? c().baseline[0] : null, toNum(v)]; });
   bind('fWin0', v => { c().t_window = [toNum(v), c().t_window ? c().t_window[1] : null]; });
   bind('fWin1', v => { c().t_window = [c().t_window ? c().t_window[0] : null, toNum(v)]; });
-  const optional = (key, v) => { const n = toNum(v); if (n === null) delete c()[key]; else c()[key] = n; };
   bind('fUp', v => optional('upstream_len', v));
   bind('fOut', v => optional('outlet_len', v));
   $('fTruth').addEventListener('change', e => {
@@ -233,6 +233,7 @@ function wireFields() {
     cfg.outlets.push(last.slice());
     cfg.outlet_names.push(`출구${cfg.outlets.length}`);
     cfg.hose_mm.branches.push(cfg.hose_mm.stem);
+    if (cfg.flow_mL_s) cfg.flow_mL_s.push(null);
     fillPorts(); sync();
   });
   $('preset').addEventListener('change', e => { if (e.target.value !== 'file') usePreset(e.target.value); });
@@ -249,17 +250,15 @@ function wireFields() {
       $('preset').value = 'file';
       clearError();
     } catch (err) {
-      showError(`${file.name}을 읽지 못했어요. JSON 형식인지 확인하세요.`);
+      showError(`${file.name}: JSON 형식 오류`);
     }
   });
   $('cfgText').addEventListener('input', e => {
     try {
       const cfg = JSON.parse(e.target.value);
-      for (const key of ['sensors', 'inlet', 'outlets']) if (!cfg[key]) throw new Error(`"${key}" 항목이 없어요`);
-      state.cfg = cfg;
+      for (const key of ['sensors', 'inlet', 'outlets']) if (!cfg[key]) throw new Error(`"${key}" 항목 없음`);
+      state.cfg = normalize(cfg);
       if (cfg.truth) state.truth = clone(cfg.truth);
-      if (!cfg.hose_mm) cfg.hose_mm = { stem: 3, branches: cfg.outlets.map(() => 3) };
-      if (!cfg.outlet_names) cfg.outlet_names = cfg.outlets.map((_, i) => `출구${i + 1}`);
       fillForm(); validate();
       $('cfgError').hidden = true;
     } catch (err) {
@@ -284,29 +283,30 @@ function sync() {
 function checkConfig() {
   const c = state.cfg, out = [];
   const coord = p => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite);
-  if (!Number.isInteger(c.run)) out.push('Run 번호를 입력하세요.');
+  if (!Number.isInteger(c.run)) out.push('Run 번호 입력');
   const span = (r, name) => {
-    if (!r || !Number.isFinite(r[0]) || !Number.isFinite(r[1])) out.push(`${name}을 입력하세요.`);
-    else if (r[0] >= r[1]) out.push(`${name}은 시작이 끝보다 작아야 해요.`);
+    if (!r || !Number.isFinite(r[0]) || !Number.isFinite(r[1])) out.push(`${name} 입력`);
+    else if (r[0] >= r[1]) out.push(`${name}: 시작이 끝보다 작아야 함`);
   };
   span(c.baseline, '기준 구간'); span(c.t_window, '분석 구간');
   for (const [key, pos] of Object.entries(c.sensors)) {
-    if (!coord(pos)) out.push(`${key} 위치를 모두 입력하세요.`);
-    if (!c.ids || !c.ids[key]) out.push(`${key} ID를 입력하세요.`);
+    if (!coord(pos)) out.push(`${key} 위치 입력`);
+    if (!c.ids || !c.ids[key]) out.push(`${key} ID 입력`);
   }
-  if (!coord(c.inlet)) out.push('입구 좌표를 모두 입력하세요.');
-  c.outlets.forEach((p, k) => { if (!coord(p)) out.push(`출구 ${k + 1} 좌표를 모두 입력하세요.`); });
+  if (!coord(c.inlet)) out.push('입구 좌표 입력');
+  c.outlets.forEach((p, k) => { if (!coord(p)) out.push(`출구 ${k + 1} 좌표 입력`); });
   const hoses = [c.hose_mm.stem, ...c.hose_mm.branches.slice(0, c.outlets.length)];
-  if (hoses.length !== c.outlets.length + 1 || !hoses.every(d => Number.isFinite(d) && d > 0)) out.push('호스 안지름을 모두 입력하세요.');
-  if (document.querySelector('[data-bad-mask]')) out.push('뺄 구간은 69-999처럼 쓰고, 여러 개면 쉼표로 나누세요.');
+  if (hoses.length !== c.outlets.length + 1 || !hoses.every(d => Number.isFinite(d) && d > 0)) out.push('호스 내경 입력');
+  if ((c.flow_mL_s || []).some(q => q !== null && !(q > 0))) out.push('유량은 0보다 커야 함');
+  if (document.querySelector('[data-bad-mask]')) out.push('뺄 구간 형식: 69-999, 120-130');
   if (state.columns) {
     const cols = state.columns.get(c.run);
-    if (!cols) out.push(`Run #${c.run}: 이 파일에 없는 번호예요. ${runLabel(state.columns)} 중에서 고르세요.`);
+    if (!cols) out.push(`Run #${c.run} 없음 (파일: ${runLabel(state.columns)})`);
     else {
-      if (!cols.has(`Time (s) Run #${c.run}`)) out.push(`Run #${c.run}에 시간 열이 없어요.`);
-      if (!cols.has(`Output Current (A) Run #${c.run}`)) out.push(`Run #${c.run}에 전류(Output Current) 열이 없어요.`);
+      if (!cols.has(`Time (s) Run #${c.run}`)) out.push(`Run #${c.run}: 시간 열 없음`);
+      if (!cols.has(`Output Current (A) Run #${c.run}`)) out.push(`Run #${c.run}: 전류 열 없음`);
       for (const [key, id] of Object.entries(c.ids || {})) {
-        if (id && !cols.has(`X Magnetic Field Strength, ${id} (G) Run #${c.run}`)) out.push(`Run #${c.run}에 ${key}(${id}) 값이 없어요. 센서 ID를 확인하세요.`);
+        if (id && !cols.has(`X Magnetic Field Strength, ${id} (G) Run #${c.run}`)) out.push(`Run #${c.run}: ${key} (${id}) 열 없음`);
       }
     }
   }
@@ -326,7 +326,7 @@ function startWorker() {
   worker.onmessage = ({ data }) => handle(data);
   worker.onerror = e => {
     finishRun();
-    showError(`실행 중 문제가 생겼어요: ${e.message || '브라우저가 작업을 멈췄어요'}. 메모리가 부족했다면 다른 탭을 닫고 다시 시도하세요.`);
+    showError(`실행 오류: ${e.message || '브라우저가 작업을 멈춤'}`);
     dropWorker();
   };
   state.worker = worker;
@@ -340,40 +340,37 @@ function dropWorker() {
 
 function handle(msg) {
   if (msg.type === 'stage' && state.running) setStage(null, msg.text);
-  if (msg.type === 'log') { if (state.running) { addLog(msg.text); track(msg.text); } }
+  if (msg.type === 'log' && state.running) { addLog(msg.text); track(msg.text); }
   if (msg.type === 'failed') {
     if (!state.running) { dropWorker(); return; }
     finishRun();
     showError(explain(msg.message));
     if (msg.trace) addLog(msg.trace);
-    $('logBox').open = true;
     $('progress').hidden = true;
     dropWorker();
   }
   if (msg.type === 'done') {
-    const run = state.jobRun;
+    const job = state.job;
     finishRun();
-    setStage(1, '복원을 마쳤어요');
-    showResult({ name: `recon_run${run}`, html: msg.html, json: msg.json, label: `Run #${run} 복원 결과` });
-    if (matchMedia('(max-width: 1040px)').matches) $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setStage(1, '완료');
+    addResult({ ...job, time: Date.now(), html: msg.html, json: msg.json });
+    if (matchMedia('(max-width: 860px)').matches) $('result').scrollIntoView({ behavior: 'smooth' });
   }
 }
 
 /* recon3d.py의 진행 출력에서 단계를 읽는다 */
 function track(line) {
   let m;
-  if (/불러오는 중/.test(line)) setStage(0.04, '측정값을 읽는 중');
-  else if (/경로 맞추는 중/.test(line)) setStage(0.08, '시작점마다 경로를 맞추는 중');
-  else if ((m = line.match(/1단계 (\d+)\/(\d+)/))) setStage(0.08 + 0.62 * m[1] / m[2], `시작점마다 경로를 맞추는 중 (${m[1]}/${m[2]})`);
-  else if ((m = line.match(/2단계 (\d+)\/(\d+)/))) {
-    const last = m[1] === m[2];
-    setStage(0.7 + 0.25 * m[1] / m[2], last ? '결과를 정리하는 중' : `좋은 후보를 다듬는 중 (${m[1]}/${m[2]})`);
-  }
+  if (/불러오는 중/.test(line)) setStage(0.04, '데이터 읽는 중');
+  else if (/경로 맞추는 중/.test(line)) setStage(0.08, '경로 맞춤');
+  else if ((m = line.match(/1단계 (\d+)\/(\d+)/))) setStage(0.08 + 0.62 * m[1] / m[2], `경로 맞춤 ${m[1]}/${m[2]}`);
+  else if ((m = line.match(/2단계 (\d+)\/(\d+)/))) setStage(0.7 + 0.25 * m[1] / m[2], `후보 정밀 맞춤 ${m[1]}/${m[2]}`);
+  else if (/굵기 추정 중/.test(line)) setStage(0.96, '안지름 추정');
 }
 
 function explain(message) {
-  if (/empty|finite|NaN|nan/i.test(message)) return `맞춤을 시작하지 못했어요. 기준 구간과 분석 구간이 측정 시간 안에 있는지 확인하세요. (${message})`;
-  if (/MemoryError|out of memory/i.test(message)) return '메모리가 부족해요. 다른 탭을 닫거나 CSV에서 필요한 Run만 내보내 다시 시도하세요.';
+  if (/empty|finite|NaN|nan/i.test(message)) return `맞춤 실패: 기준 구간과 분석 구간이 측정 시간 안에 있는지 확인 (${message})`;
+  if (/MemoryError|out of memory/i.test(message)) return '메모리 부족: 다른 탭을 닫거나 필요한 Run만 내보내기';
   return message;
 }
 
@@ -397,10 +394,8 @@ function beginRun() {
   $('log').textContent = '';
   $('progress').hidden = false;
   $('logBox').hidden = false;
-  $('logBox').open = false;
-  $('runNote').hidden = true;
   $('stopBtn').hidden = false;
-  setStage(0.02, '실행 환경을 준비하는 중');
+  setStage(0.02, '실행 환경 준비');
   const started = performance.now();
   const tick = () => {
     const s = Math.floor((performance.now() - started) / 1000);
@@ -420,7 +415,7 @@ function finishRun() {
 
 function run() {
   if (checkConfig().length || !state.file) return;
-  state.jobRun = state.cfg.run;
+  state.job = { run: state.cfg.run, title: state.cfg.title || '', csv: state.file.name };
   beginRun();
   startWorker();
   state.worker.postMessage({ type: 'run', file: state.file, cfg: clone(state.cfg) });
@@ -430,35 +425,138 @@ function stop() {
   dropWorker();
   finishRun();
   $('progress').hidden = true;
-  $('runNote').hidden = false;
-  addLog('사용자가 중단했어요.');
+  addLog('중단');
 }
 
 /* ---------- 결과 ---------- */
-const SANS = '"IBM Plex Sans KR","Pretendard","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif';
-const EMBED_HEAD = `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap"><style>
-:root{--bg:#e7eef2;--panel:#f7fafb;--ink:#20262b;--muted:#566672;--line:#c6d2d9;--grid:#e3eaee;--scene:#dbe4e9}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14191d;--panel:#1b2226;--ink:#e5ebee;--muted:#9aa9b3;--line:#333e45;--grid:#2a3339;--scene:#182025}}
-html{overflow:hidden}body{font-family:${SANS};background:var(--bg);word-break:keep-all}
-.wrap{max-width:none;padding:0}.card{border-radius:4px}#stage{border-radius:2px}button{border-radius:4px}h1{font-size:18px;font-weight:600}
-</style>`;
-const EMBED_TAIL = `<script>(function(){var send=function(){parent.postMessage({recon3dHeight:document.documentElement.scrollHeight},"*")};new ResizeObserver(send).observe(document.body);addEventListener("load",send);send()})();<\/script>`;
-
-function embed(html) {
-  const head = html.indexOf('</head>');
-  const tail = html.lastIndexOf('</body>');
-  if (head < 0 || tail < 0) return html;
-  return html.slice(0, head) + EMBED_HEAD + html.slice(head, tail) + EMBED_TAIL + html.slice(tail);
-}
-
 function showResult(result) {
   state.result = result;
-  $('resultTitle').textContent = result.label;
-  $('actions').hidden = false;
-  $('empty').hidden = true;
-  const frame = $('viewer');
-  frame.hidden = false;
-  frame.srcdoc = embed(result.html);
+  $('saveHtml').hidden = !result;
+  $('saveJson').hidden = !result;
+  $('empty').hidden = !!result;
+  $('viewer').hidden = !result;
+  if (result) $('viewer').srcdoc = result.html;
+  else $('viewer').removeAttribute('srcdoc');
+  renderList();
+}
+
+/* 저장된 결과: 이 브라우저의 IndexedDB에 둔다. 쓸 수 없으면 새로고침 전까지만 목록에 남는다 */
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('recon3d', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('results', { keyPath: 'id', autoIncrement: true });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function store(mode, work) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('results', mode);
+    const req = work(tx.objectStore('results'));
+    tx.oncomplete = () => { db.close(); resolve(req.result); };
+    tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+  });
+}
+
+function rowSummary(entry) {
+  try {
+    const s = JSON.parse(entry.json);
+    const parts = [`χ²/N ${s.chi2_per_N.toFixed(2)}`];
+    const pieces = (s.thickness && s.thickness.pieces) || [];
+    const sizes = pieces.filter(p => p.d_mm !== undefined).map(p => p.d_mm.toFixed(2));
+    if (sizes.length) parts.push(`내경 ${sizes.join(', ')} mm`);
+    else if (pieces.length && pieces.every(p => !p.resolved)) parts.push('내경 판정 불가');
+    return parts.join(', ');
+  } catch (e) {
+    return '';
+  }
+}
+
+function pad(n) { return String(n).padStart(2, '0'); }
+function stamp(t) {
+  const d = new Date(t);
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderList() {
+  const current = state.result && state.result.id;
+  $('resultCount').textContent = state.results.length || '';
+  $('noResults').hidden = state.results.length > 0;
+  $('results').replaceChildren(...state.results.map(entry => {
+    const li = document.createElement('li');
+    if (entry.id === current) li.className = 'on';
+    const open = document.createElement('button');
+    open.type = 'button'; open.className = 'item'; open.title = [entry.title, entry.csv].filter(Boolean).join('\n');
+    const top = document.createElement('span'); top.className = 'top';
+    const name = document.createElement('b'); name.textContent = entry.run ? `Run #${entry.run}` : (entry.title || entry.csv);
+    const when = document.createElement('time'); when.textContent = stamp(entry.time);
+    top.append(name, when);
+    const sub = document.createElement('span'); sub.className = 'sub'; sub.textContent = rowSummary(entry);
+    open.append(top, sub);
+    open.addEventListener('click', () => showResult(entry));
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'del'; del.textContent = '×';
+    del.setAttribute('aria-label', `${name.textContent} ${stamp(entry.time)} 삭제`);
+    del.addEventListener('click', () => removeResult(entry));
+    li.append(open, del);
+    return li;
+  }));
+}
+
+async function addResult(entry) {
+  try {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    entry.id = await store('readwrite', s => s.add(entry));
+    $('listError').hidden = true;
+  } catch (e) {
+    entry.id = -Date.now();
+    $('listError').hidden = false;
+    $('listError').textContent = '브라우저 저장 실패: 새로고침하면 사라짐';
+  }
+  state.results.unshift(entry);
+  showResult(entry);
+}
+
+async function removeResult(entry) {
+  if (!confirm(`Run #${entry.run} ${stamp(entry.time)} 결과 삭제`)) return;
+  if (entry.id > 0) {
+    try { await store('readwrite', s => s.delete(entry.id)); } catch (e) { /* 목록에서는 뺀다 */ }
+  }
+  state.results = state.results.filter(r => r !== entry);
+  if (state.result === entry) showResult(state.results[0] || null);
+  else renderList();
+}
+
+async function loadResults() {
+  try {
+    state.results = (await store('readonly', s => s.getAll())).sort((a, b) => b.time - a.time);
+  } catch (e) {
+    state.results = [];
+  }
+  showResult(state.results[0] || null);
+}
+
+async function importResult(file) {
+  const html = await file.text();
+  const found = html.match(/const D = (\{[\s\S]*?\});\nconst css =/);
+  try {
+    const data = JSON.parse(found[1]);
+    const run = (String(data.title).match(/Run #(\d+)/) || [])[1];
+    await addResult({ run: run ? Number(run) : null, title: data.title || '', csv: file.name, time: file.lastModified || Date.now(), html, json: JSON.stringify(data.summary) });
+    state.results.sort((a, b) => b.time - a.time);
+    renderList();
+  } catch (e) {
+    $('listError').hidden = false;
+    $('listError').textContent = `${file.name}: 복원 결과 HTML 아님`;
+  }
+}
+
+function setTab(list) {
+  $('paneForm').hidden = list;
+  $('paneList').hidden = !list;
+  $('tabForm').setAttribute('aria-selected', String(!list));
+  $('tabList').setAttribute('aria-selected', String(list));
 }
 
 function save(name, text, type) {
@@ -469,42 +567,21 @@ function save(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-async function showExample() {
-  try {
-    const [html, json] = await Promise.all([fetch('samples/result_run40.html'), fetch('samples/result_run40.json')]);
-    if (!html.ok || !json.ok) return;
-    showResult({ name: 'recon_run40', html: await html.text(), json: await json.text(), label: '예제 결과: Run #40 곧은 호스' });
-    $('samples').hidden = false;
-  } catch (e) { /* 예제를 지운 저장소에서는 빈 화면으로 시작한다 */ }
-}
-
-/* 넓은 화면에서 설정 패널이 언제나 화면 안에 들어오게 한다 (복원 버튼이 가려지지 않도록) */
-function fitRail() {
-  const rail = document.querySelector('.rail');
-  if (!matchMedia('(min-width: 1041px)').matches) { rail.style.maxHeight = ''; return; }
-  const top = Math.max(0, rail.parentElement.getBoundingClientRect().top);
-  rail.style.maxHeight = `${innerHeight - top}px`;
-}
-
 /* ---------- 시작 ---------- */
 async function main() {
-  drawFilings($('filings'));
-  fitRail();
-  addEventListener('scroll', fitRail, { passive: true });
-  addEventListener('resize', fitRail);
-  wireDrop(); wireFields();
+  wireFile(); wireFields();
   $('runBtn').addEventListener('click', run);
   $('stopBtn').addEventListener('click', stop);
-  $('saveHtml').addEventListener('click', () => save(`${state.result.name}.html`, state.result.html, 'text/html'));
-  $('saveJson').addEventListener('click', () => save(`${state.result.name}.json`, state.result.json, 'application/json'));
-  document.querySelectorAll('[data-sample]').forEach(b => b.addEventListener('click', () => loadSample(b.dataset.sample)));
-  addEventListener('message', e => {
-    if (e.source === $('viewer').contentWindow && e.data && e.data.recon3dHeight) $('viewer').style.height = `${e.data.recon3dHeight}px`;
-  });
-
+  const fileName = () => `recon_run${state.result.run || 'result'}`;
+  $('saveHtml').addEventListener('click', () => save(`${fileName()}.html`, state.result.html, 'text/html'));
+  $('saveJson').addEventListener('click', () => save(`${fileName()}.json`, state.result.json, 'application/json'));
+  $('tabForm').addEventListener('click', () => setTab(false));
+  $('tabList').addEventListener('click', () => setTab(true));
+  $('importBtn').addEventListener('click', () => $('importInput').click());
+  $('importInput').addEventListener('change', e => { if (e.target.files[0]) importResult(e.target.files[0]); e.target.value = ''; });
   state.presets = await (await fetch('configs/index.json')).json();
   $('preset').replaceChildren(...state.presets.map(p => new Option(p.label, p.id)));
   await usePreset(state.presets[0].id);
-  showExample();
+  await loadResults();
 }
 main();
