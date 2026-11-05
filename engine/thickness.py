@@ -258,6 +258,13 @@ def piece_info(cfg, model, n):
 
 def estimate(cfg, tt, data, I, model, best_nodes):
     nodes, path_kind = nodes_from(cfg, model, best_nodes)
+    if path_kind == '실제 경로':
+        with R.as_written(model.g):
+            return measure(cfg, tt, data, I, model, nodes, path_kind)
+    return measure(cfg, tt, data, I, model, nodes, path_kind)
+
+
+def measure(cfg, tt, data, I, model, nodes, path_kind):
     front = FrontModel(model, nodes)
     t_on = onset(tt, data)
     start = max(float(tt[0]), t_on - 12)

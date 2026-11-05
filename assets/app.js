@@ -133,6 +133,7 @@ function fillForm() {
   $('fBase0').value = val(c.baseline && c.baseline[0]); $('fBase1').value = val(c.baseline && c.baseline[1]);
   $('fWin0').value = val(c.t_window && c.t_window[0]); $('fWin1').value = val(c.t_window && c.t_window[1]);
   $('fUp').value = val(c.upstream_len); $('fOut').value = val(c.outlet_len);
+  $('fCurve').value = c.curve === false ? 'kink' : c.curve === 'free' ? 'free' : 'hole';
   $('fStem').value = val(c.hose_mm.stem);
   $('fBranches').value = (c.hose_mm.branches || []).join(', ');
   delete $('fBranches').dataset.bad;
@@ -250,6 +251,7 @@ function wireFields() {
   });
   $('fTopo').addEventListener('change', e => { c().topology = e.target.value; fillStructure(); sync(); });
   $('fExit').addEventListener('change', e => { c().exit = e.target.value === 'auto' ? 'auto' : Number(e.target.value); sync(); });
+  $('fCurve').addEventListener('change', e => { c().curve = { hole: true, free: 'free', kink: false }[e.target.value]; sync(); });
   $('fTruth').addEventListener('change', e => {
     if (e.target.checked && state.truth) {
       if (state.truth.truth) c().truth = clone(state.truth.truth);

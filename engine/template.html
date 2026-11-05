@@ -137,7 +137,7 @@ if (S.topology_compare && S.chi2_per_N > 2) rows.push(['주의', `<span class="b
 if (S.J) rows.push([LOOP ? '분기점 J1' : '분기점', fp(S.J)]);
 if (S.J2) rows.push(['합류점 J2', fp(S.J2)]);
 if (STEP && S.P) { rows.push(['굵기 바뀌는 점 P', fp(S.P)]); rows.push(['입구→P', `${f1(S.step_s_cm)} cm`]); }
-S.C.forEach((c, k) => rows.push([`꺾임 ${names[k] || k + 1}`, fp(c)]));
+S.C.forEach((c, k) => rows.push([`중간점 ${names[k] || k + 1}`, fp(c)]));
 if (nb >= 2) rows.push(['입구→분기점', `${f1(S.stem_len_cm)} cm`]);
 S.branch_len_cm.forEach((L, k) => rows.push([`길이 ${names[k] || k + 1}`, `${f1(L)} cm`]));
 if (S.merge_len_cm !== undefined) rows.push(['합류점→출구', `${f1(S.merge_len_cm)} cm`]);
@@ -163,7 +163,7 @@ else {
 }
 if (D.truth) lg.push(['--truth', '실제 경로']);
 document.getElementById('legend').innerHTML = lg.map(([c, t]) => `<span><i class="sw" style="background:var(${c})"></i>${t}</span>`).join('');
-if (nb < 2) document.querySelector('[data-f="J"]').textContent = STEP ? 'P' : '꺾임';
+if (nb < 2) document.querySelector('[data-f="J"]').textContent = STEP ? 'P' : '중간점';
 
 // ---------- vector helpers ----------
 const V3 = {
@@ -320,7 +320,8 @@ function start3D() {
   // 꺾인 점을 둥글게
   function smooth(nodes, R, step) {
     const pts = [nodes[0]];
-    for (let i = 1; i < nodes.length - 1; i++) {
+    if (nodes.length > 6) pts.push(...nodes.slice(1, -1));   // 이미 곡선으로 계산된 경로
+    else for (let i = 1; i < nodes.length - 1; i++) {
       const a = nodes[i - 1], p = nodes[i], b = nodes[i + 1];
       const l1 = V3.len(V3.sub(p, a)), l2 = V3.len(V3.sub(b, p)); if (l1 < 1e-6 || l2 < 1e-6) continue;
       const u1 = V3.mul(V3.sub(p, a), 1 / l1), u2 = V3.mul(V3.sub(b, p), 1 / l2);
@@ -455,12 +456,14 @@ function start3D() {
     const Cw = W(S.C[0]); addMesh(torus(Cw, V3.norm(V3.sub(W(D.outlets[0]), inletW)), rOut(dB) * 1.7, 0.05, 40, 8), { col: [0.6, 0.6, 0.65], spec: 0.4, shin: 30 }, 'hose');
     if (V3.len(V3.sub(Cw, P0)) > 1) addLabel(Cw, 'C', css('--muted'), false);
   }
-  // 꺾이는 점 표시 링
+  // 중간점 표시 링
   best.forEach((pl, i) => {
     if (STEP) return;
     if (nb >= 2 && i === 0) return;
     if (LOOP && i === 3) return;
-    const k = nb >= 2 ? i - 1 : 0; const C = pl[1]; const d = V3.norm(V3.sub(pl[2], pl[0]));
+    const k = nb >= 2 ? i - 1 : 0; const C = W(S.C[k]);
+    let near = 0; pl.forEach((q, j) => { if (V3.len(V3.sub(q, C)) < V3.len(V3.sub(pl[near], C))) near = j; });
+    const d = V3.norm(V3.sub(pl[Math.min(near + 1, pl.length - 1)], pl[Math.max(near - 1, 0)]));
     const dd = nb >= 2 ? (hoseMM.branches[k] || hoseMM.stem) : hoseMM.stem;
     addMesh(torus(C, d, rOut(dd) * 1.7, 0.05, 40, 8), { col: pieceCol(i), spec: 0.4, shin: 30 }, 'hose');
     addLabel(C, `C${k + 1}`, css(nb >= 2 ? brCol[k % 3] : '--b1'), false);
@@ -561,7 +564,7 @@ function start3D() {
   stage.addEventListener('pointerup', up_); stage.addEventListener('pointercancel', up_);
   stage.addEventListener('wheel', e => { e.preventDefault(); dist = Math.min(diag * 8, Math.max(diag * 0.1, dist * Math.exp(e.deltaY * 0.0012))); mark(); }, { passive: false });
   document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { [yaw, pitch] = VIEWS[b.dataset.v]; target = center.slice(); dist = diag * 1.9; mark(); });
-  const focus = { J: (nb >= 2 || STEP) ? best[0][best[0].length - 1] : best[0][1], in: inletW, out: V3.mul(V3.add(outsW[0], outsW[outsW.length - 1]), 0.5) };
+  const focus = { J: (nb >= 2 || STEP) ? best[0][best[0].length - 1] : W(S.C[0]), in: inletW, out: V3.mul(V3.add(outsW[0], outsW[outsW.length - 1]), 0.5) };
   const fview = { J: [0.75, 0.5, 9], in: [-0.9, 0.25, 6], out: [1.1, 0.3, outsW.length > 1 ? 11 : 6] };
   document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { const f = b.dataset.f; target = focus[f].slice(); [yaw, pitch, dist] = fview[f]; mark(); });
   const tg = (id, key) => document.getElementById(id).onchange = e => { show[key] = e.target.checked; mark(); };

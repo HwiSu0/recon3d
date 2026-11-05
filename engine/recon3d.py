@@ -20,18 +20,26 @@ recon3d.py - 자기장 측정으로 숨은 통로의 3D 경로를 복원하는 �
 import sys, os, json, math, time
 import numpy as np, pandas as pd
 from scipy.optimize import least_squares
+from scipy.special import ellipk, ellipe
+from contextlib import contextmanager
 
 MU0 = 4e-7 * math.pi
 # ---------------- coil model (lab frame: x=a, y=c, z=b; cm) ----------------
 R200 = (0.1006 + 0.1058) / 2; R500 = (0.1006 + 0.1137) / 2; DCOIL = 0.12
 AXIS_Y, AXIS_Z, XC = 16.5, 4.0, 5.0
-_th = np.linspace(0, 2 * np.pi, 360, endpoint=False)
 
 def _loop(P, zc, R):
-    pts = np.stack([R * np.cos(_th), R * np.sin(_th), np.full_like(_th, zc)], 1)
-    dl = np.stack([-R * np.sin(_th), R * np.cos(_th), np.zeros_like(_th)], 1) * (2 * np.pi / len(_th))
-    r = P[:, None, :] - pts[None]; rn = np.linalg.norm(r, axis=2)[..., None]
-    return MU0 / (4 * np.pi) * np.sum(np.cross(dl[None], r) / rn ** 3, 1)
+    """반지름 R 원형 전류(1회, 1 A)의 자기장. 타원 적분 공식이라 원 둘레를 나눠 더할 때보다 훨씬 빠르다."""
+    x, y, z = P[:, 0], P[:, 1], P[:, 2] - zc
+    rho2 = x * x + y * y; rho = np.sqrt(rho2); z2 = z * z
+    a2 = (R + rho) ** 2 + z2; b2 = (R - rho) ** 2 + z2
+    m = 4 * R * rho / a2; K = ellipk(m); E = ellipe(m)
+    c = MU0 / (2 * np.pi * np.sqrt(a2))
+    Bz = c * (K + (R * R - rho2 - z2) / b2 * E)
+    k = c * z * (-K + (R * R + rho2 + z2) / b2 * E)
+    safe = rho2 > 1e-18
+    kr = np.divide(k, rho2, out=np.zeros_like(k), where=safe)
+    return np.stack([kr * x, kr * y, Bz], 1)
 
 def B0lab(P, I):
     P = np.atleast_2d(np.asarray(P, float))
@@ -96,9 +104,11 @@ def load(cfg):
     return tc, data, Iref
 
 # ---------------- geometry ----------------
+LUMP_NEAR_CM = 20.0; LUMP_STEP_CM = 2.0; CURVE_SUB = 16
+
 class Geometry:
     def __init__(self, cfg, I):
-        self.I = I; self.ds = cfg.get('ds', 0.25)
+        self.I = I; self.ds = cfg.get('ds', 0.25); self.curve = cfg.get('curve', True)
         self.inlet = abc2lab(cfg['inlet'])
         self.outlets = [abc2lab(o) for o in cfg['outlets']]
         self.up_dir = np.array(cfg.get('upstream_dir_abc', [-1, 0, 0]), float)[[0, 2, 1]]
@@ -108,12 +118,21 @@ class Geometry:
         # fixed parts (precomputed): upstream hose and outside outlet hoses
         s = np.arange(-self.L_up, 0, self.ds) + self.ds / 2
         self.up_pts = self.inlet[None] + np.outer(-s, self.up_dir / np.linalg.norm(self.up_dir))
-        self.up_s = s; self.up_G = self.unit_field(self.up_pts)
+        self.up_G, self.up_s = self.lump(self.unit_field(self.up_pts), s, -s)
         self.out_pts = []; self.out_G = []
         for o in self.outlets:
             so = np.arange(0, self.L_out, self.ds) + self.ds / 2
             p = o[None] + np.outer(so, self.out_dir / np.linalg.norm(self.out_dir))
-            self.out_pts.append((p, so)); self.out_G.append(self.unit_field(p))
+            G, sl = self.lump(self.unit_field(p), so, so)
+            self.out_pts.append((p, sl)); self.out_G.append(G)
+
+    def lump(self, G, s, dist, near=LUMP_NEAR_CM, step=LUMP_STEP_CM):
+        """상자에서 먼 호스는 신호가 작고 천천히 변하므로 조각을 묶어 계산량을 줄인다."""
+        n = max(1, int(round(step / self.ds)))
+        groups = [[i] for i in np.where(dist <= near)[0]]
+        far = np.where(dist > near)[0]
+        groups += [list(far[i:i + n]) for i in range(0, len(far), n)]
+        return {k: np.array([v[g].sum(0) for g in groups]) for k, v in G.items()}, np.array([s[g].mean() for g in groups])
 
     def unit_field(self, P):
         B0 = B0lab(P, self.I); G = {}
@@ -122,7 +141,34 @@ class Geometry:
             G[k] = (self.ds / (4 * np.pi * rn ** 3))[:, None] * (3 * np.sum(B0 * rh, 1)[:, None] * rh - B0)
         return G
 
+    def curve_pts(self, nodes, sub=CURVE_SUB):
+        """점들을 지나는 매끈한 곡선(3차 에르미트). 상자 구멍에서는 호스가 벽에 수직으로 드나든다."""
+        nodes = [np.asarray(n, float) for n in nodes]
+        if not self.curve: return np.array(nodes)
+        nodes = [n for i, n in enumerate(nodes) if i == 0 or np.linalg.norm(n - nodes[i - 1]) > 1e-6]
+        if len(nodes) < 2: return np.array(nodes)
+        unit = lambda v: v / max(np.linalg.norm(v), 1e-9)
+        tang = [unit(nodes[min(i + 1, len(nodes) - 1)] - nodes[max(i - 1, 0)]) for i in range(len(nodes))]
+        if self.curve != 'free':
+            if np.array_equal(nodes[0], self.inlet): tang[0] = -unit(self.up_dir)
+            if any(np.array_equal(nodes[-1], o) for o in self.outlets): tang[-1] = unit(self.out_dir)
+        u = (np.arange(sub) / sub)[:, None]
+        h00 = 2 * u ** 3 - 3 * u ** 2 + 1; h10 = u ** 3 - 2 * u ** 2 + u; h01 = 1 - h00; h11 = u ** 3 - u ** 2
+        out = []
+        for a, b, ta, tb in zip(nodes[:-1], nodes[1:], tang[:-1], tang[1:]):
+            L = np.linalg.norm(b - a)
+            out.append(h00 * a + h10 * (L * ta) + h01 * b + h11 * (L * tb))
+        out.append(nodes[-1][None])
+        return np.concatenate(out)
+
     def polyline(self, nodes):
+        if self.curve:
+            Q = self.curve_pts(nodes)
+            if len(Q) < 2: return np.zeros((0, 3)), np.zeros(0), 0.0
+            cum = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(Q, axis=0), axis=1))]; L = cum[-1]
+            if L < 1e-6: return np.zeros((0, 3)), np.zeros(0), 0.0
+            n = max(1, int(round(L / self.ds))); s = (np.arange(n) + 0.5) * L / n
+            return np.stack([np.interp(s, cum, Q[:, k]) for k in range(3)], 1), s, L
         pts = []; ss = []; s0 = 0.0
         for a, b in zip(nodes[:-1], nodes[1:]):
             L = np.linalg.norm(b - a)
@@ -169,9 +215,9 @@ class Model:
         return out
 
     def nodes(self, p):
-        g = self.g
-        if self.nb == 1: return [[lab2abc(g.inlet), lab2abc(p['C'][0]), lab2abc(g.outlets[0])]]
-        return [[lab2abc(g.inlet), lab2abc(p['J'])]] + [[lab2abc(p['J']), lab2abc(p['C'][k]), lab2abc(g.outlets[k])] for k in range(self.nb)]
+        g = self.g; ch = lambda n: [lab2abc(x) for x in g.curve_pts(n)]
+        if self.nb == 1: return [ch([g.inlet, p['C'][0], g.outlets[0]])]
+        return [ch([g.inlet, p['J']])] + [ch([p['J'], p['C'][k], g.outlets[k]]) for k in range(self.nb)]
 
     def init_geom(self, rng, i):
         g = self.g; span = self.phi - self.plo; a_only = np.array([1.0, 0, 0]); not_a = np.array([0, 1.0, 1.0])
@@ -267,9 +313,8 @@ class ModelLoop:
         return {'stem': g.polyline([g.inlet, p['J']]), 'br': [g.polyline([p['J'], p['C'][k], p['J2']]) for k in range(2)],
                 'merge': g.polyline([p['J2'], O])}
     def nodes(self, p):
-        g = self.g; O = g.outlets[self.oi]
-        return [[lab2abc(g.inlet), lab2abc(p['J'])], [lab2abc(p['J']), lab2abc(p['C'][0]), lab2abc(p['J2'])],
-                [lab2abc(p['J']), lab2abc(p['C'][1]), lab2abc(p['J2'])], [lab2abc(p['J2']), lab2abc(O)]]
+        g = self.g; O = g.outlets[self.oi]; ch = lambda n: [lab2abc(x) for x in g.curve_pts(n)]
+        return [ch([g.inlet, p['J']]), ch([p['J'], p['C'][0], p['J2']]), ch([p['J'], p['C'][1], p['J2']]), ch([p['J2'], O])]
     def init_geom(self, rng, i):
         g = self.g; span = self.phi - self.plo; O = g.outlets[self.oi]
         a_only = np.array([1.0, 0, 0]); not_a = np.array([0, 1.0, 1.0])
@@ -331,20 +376,17 @@ class ModelStep:
     def _line(self, p):
         g = self.g; return [g.inlet, p['C'][0], g.outlets[self.oi]]
     def point_at(self, p):
-        nodes = self._line(p); seg = [np.linalg.norm(b - a) for a, b in zip(nodes[:-1], nodes[1:])]
-        L = sum(seg); target = p['sf'] * L; acc = 0
-        for (a, b), l in zip(zip(nodes[:-1], nodes[1:]), seg):
-            if acc + l >= target and l > 0: return a + (b - a) * (target - acc) / l, L, target
-            acc += l
-        return nodes[-1], L, target
+        Q = self.g.curve_pts(self._line(p))
+        cum = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(Q, axis=0), axis=1))]; L = cum[-1]; target = p['sf'] * L
+        return np.array([np.interp(target, cum, Q[:, k]) for k in range(3)]), L, target
     def paths(self, p):
         pts, s, L = self.g.polyline(self._line(p))
         return {'stem': (np.zeros((0, 3)), np.zeros(0), 0.0), 'br': [(pts, s, L)]}
     def nodes(self, p):
-        nodes = self._line(p); P, L, sP = self.point_at(p)
-        seg = np.cumsum([0] + [np.linalg.norm(b - a) for a, b in zip(nodes[:-1], nodes[1:])])
-        first = [lab2abc(n) for n, sv in zip(nodes, seg) if sv < sP - 1e-9] + [lab2abc(P)]
-        second = [lab2abc(P)] + [lab2abc(n) for n, sv in zip(nodes, seg) if sv > sP + 1e-9]
+        Q = self.g.curve_pts(self._line(p)); P, L, sP = self.point_at(p)
+        cum = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(Q, axis=0), axis=1))]
+        first = [lab2abc(n) for n, sv in zip(Q, cum) if sv < sP - 1e-9] + [lab2abc(P)]
+        second = [lab2abc(P)] + [lab2abc(n) for n, sv in zip(Q, cum) if sv > sP + 1e-9]
         return [first, second]
     def init_geom(self, rng, i):
         g = self.g; span = self.phi - self.plo; O = g.outlets[self.oi]
@@ -468,7 +510,7 @@ def fit(cfg, tt, data, geo, kind):
     t1 = time.time()
     for i, q0 in enumerate(starts):
         try:
-            sols1.append(least_squares(f, q0, bounds=(lo, hi), max_nfev=cfg.get('nfev1', 60)))
+            sols1.append(least_squares(f, q0, bounds=(lo, hi), max_nfev=cfg.get('nfev1', 60), ftol=cfg.get('ftol1', 1e-3), xtol=cfg.get('xtol1', 1e-3)))
         except Exception as e:
             print(f'  시작점 {i + 1} 실패:', e, flush=True)
         if (i + 1) % 4 == 0 or i + 1 == len(starts):
@@ -476,12 +518,19 @@ def fit(cfg, tt, data, geo, kind):
     sols1.sort(key=lambda s: s.cost)
     m = cfg.get('refine', 4); sols = []
     for i, s in enumerate(sols1[:m]):
-        s2 = least_squares(f, s.x, bounds=(lo, hi), max_nfev=cfg.get('max_nfev', 400))
+        s2 = least_squares(f, s.x, bounds=(lo, hi), max_nfev=cfg.get('max_nfev', 400), ftol=cfg.get('ftol2', 1e-6))
         sols.append(s2 if s2.cost <= s.cost else s)
         print(f'  2단계 {i + 1}/{min(m, len(sols1))}: chi2/N = {2 * sols[-1].cost / len(s.fun):.3f}', flush=True)
     sols += sols1[m:]
     sols.sort(key=lambda s: s.cost)
     return model, sols, Y, U, f
+
+@contextmanager
+def as_written(g):
+    """실제 경로는 곡선으로 고치지 않고 적힌 그대로 쓴다."""
+    keep = g.curve; g.curve = False
+    try: yield
+    finally: g.curve = keep
 
 def geom_from_truth(model, truth):
     """truth polylines -> geometry part of the parameter vector (None if the shape does not fit the model)."""
@@ -514,12 +563,13 @@ def fit_truth(model, f, sol, truth):
     glo = np.minimum(lo[:ng], g - 1e-3); ghi = np.maximum(hi[:ng], g + 1e-3)
     model_lo = lo.copy(); model_lo[:ng] = glo; model_hi = hi.copy(); model_hi[:ng] = ghi
     best = None
-    for q0 in [sol.x[ng:], np.clip(np.r_[sol.x[ng:ng + 2], np.full(len(sol.x) - ng - 2, 0.3)], lo[ng:] + 1e-6, hi[ng:] - 1e-6)]:
-        try:
-            s = least_squares(lambda r: f(np.r_[g, r]), q0, bounds=(lo[ng:], hi[ng:]), max_nfev=300)
-        except Exception as e:
-            print('truth fit failed:', e); continue
-        if best is None or s.cost < best.cost: best = s
+    with as_written(model.g):
+        for q0 in [sol.x[ng:], np.clip(np.r_[sol.x[ng:ng + 2], np.full(len(sol.x) - ng - 2, 0.3)], lo[ng:] + 1e-6, hi[ng:] - 1e-6)]:
+            try:
+                s = least_squares(lambda r: f(np.r_[g, r]), q0, bounds=(lo[ng:], hi[ng:]), max_nfev=300)
+            except Exception as e:
+                print('truth fit failed:', e); continue
+            if best is None or s.cost < best.cost: best = s
     if best is None: return None
     best.x = np.r_[g, best.x]
     return best
@@ -667,7 +717,8 @@ def main():
         summ['truth_error_cm'] = path_error(model, sols[0], cfg['truth'])
         st = fit_truth(model, f, sols[0], cfg['truth'])
         if st is not None:
-            summ['truth_fit'] = summarize(model, st, N)
+            with as_written(model.g):
+                summ['truth_fit'] = summarize(model, st, N)
             summ['chi2_per_N_truth_path'] = summ['truth_fit']['chi2_per_N']
     if cfg.get('thickness', True):      # 호스 내경 추정 (실패해도 복원 결과는 그대로 저장)
         print('호스 굵기 추정 중...', flush=True)
