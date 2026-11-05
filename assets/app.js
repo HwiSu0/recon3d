@@ -1,3 +1,5 @@
+import { parseHeader } from './table.js';
+
 const $ = id => document.getElementById(id);
 const clone = o => JSON.parse(JSON.stringify(o));
 
@@ -6,26 +8,15 @@ const state = {
   columns: null,     // Map: Run 번호 -> Set(열 이름)
   cfg: null,         // 설정 (recon3d.py의 config JSON과 같은 모양)
   truth: null,       // 체크를 껐다 켜도 되돌릴 수 있게 보관
-  worker: null,
   running: false,
   job: null,         // 지금 계산 중인 { run, title, csv }
   presets: [],
   result: null,      // 화면에 보이는 결과 { id, run, title, csv, time, html, json }
   results: [],       // 저장된 결과, 최신순
+  table: null,       // 지금 파일에서 잘라 낸 열 { key, table }
 };
 
 /* ---------- CSV 머리글 ---------- */
-function parseHeader(line) {
-  const cols = []; let cur = '', quoted = false;
-  for (const ch of line) {
-    if (ch === '"') quoted = !quoted;
-    else if (ch === ',' && !quoted) { cols.push(cur); cur = ''; }
-    else cur += ch;
-  }
-  cols.push(cur);
-  return cols;
-}
-
 async function readColumns(file) {
   let text = await file.slice(0, 8 << 20).text();
   const end = text.search(/\r?\n/);
@@ -44,6 +35,14 @@ async function readColumns(file) {
 function runLabel(map) {
   const runs = [...map.keys()];
   return runs.length === 1 ? `Run #${runs[0]}` : `Run #${Math.min(...runs)}~#${Math.max(...runs)}`;
+}
+
+function wantedColumns(cfg) {
+  const names = [`Time (s) Run #${cfg.run}`, `Output Current (A) Run #${cfg.run}`];
+  for (const id of Object.values(cfg.ids)) {
+    for (const c of 'XYZ') names.push(`${c} Magnetic Field Strength, ${id} (G) Run #${cfg.run}`);
+  }
+  return names;
 }
 
 /* ---------- 측정 파일 ---------- */
@@ -66,8 +65,9 @@ async function setFile(file) {
     if (match) await usePreset(match.id);
     else state.cfg.run = Math.max(...columns.keys());
   }
+  state.table = null;
   fillRun(); sync();
-  startWorker();
+  startPool();
 }
 
 function wireFile() {
@@ -351,36 +351,115 @@ function validate() {
 }
 
 /* ---------- 워커 ---------- */
-function startWorker() {
-  if (state.worker) return;
-  const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-  worker.onmessage = ({ data }) => handle(data);
-  worker.onerror = e => {
-    finishRun();
-    showError(`실행 오류: ${e.message || '브라우저가 작업을 멈춤'}`);
-    dropWorker();
-  };
-  state.worker = worker;
-  worker.postMessage({ type: 'boot' });
+/* 첫 워커가 맞춤 순서를 정하고, 계산 조각은 준비된 워커들이 나눠 맡는다.
+   나머지 워커는 첫 워커가 준비된 뒤에 띄워서 실행 환경을 한 번만 내려받게 한다 */
+const pool = { workers: [], batch: null, table: null, cfg: null, stage: null };
+
+function poolSize() {
+  const memory = navigator.deviceMemory || 8;
+  return Math.min(4, navigator.hardwareConcurrency || 2, Math.max(1, Math.floor(memory / 2)));
 }
 
-function dropWorker() {
-  if (state.worker) state.worker.terminate();
-  state.worker = null;
+function addWorker(lead) {
+  const w = { worker: new Worker(new URL('./worker.js', import.meta.url), { type: 'module' }), lead, ready: false, prepared: false, job: null };
+  w.worker.onmessage = ({ data }) => handle(w, data);
+  w.worker.onerror = e => lost(w, `실행 오류: ${e.message || '브라우저가 작업을 멈춤'}`);
+  w.worker.postMessage({ type: 'boot' });
+  pool.workers.push(w);
 }
 
-function handle(msg) {
-  if (msg.type === 'stage' && state.running) setStage(null, msg.text);
-  if (msg.type === 'log' && state.running) { addLog(msg.text); track(msg.text); }
-  if (msg.type === 'failed') {
-    if (!state.running) { dropWorker(); return; }
+function startPool() {
+  if (!pool.workers.length) addWorker(true);
+}
+
+function dropPool() {
+  for (const w of pool.workers) w.worker.terminate();
+  pool.workers = []; pool.batch = null;
+}
+
+function prepareWorker(w) {
+  w.prepared = false;
+  w.worker.postMessage({ type: 'prepare', lead: w.lead, table: pool.table, cfg: pool.cfg });
+}
+
+function pump() {
+  const b = pool.batch;
+  if (!b) return;
+  for (const w of pool.workers) {
+    if (!w.prepared || w.job !== null || w.busy) continue;
+    const id = b.redo.length ? b.redo.pop() : b.next < b.jobs.length ? b.next++ : -1;
+    if (id < 0) return;
+    w.job = id;
+    w.worker.postMessage({ type: 'job', id, job: b.jobs[id] });
+  }
+}
+
+function startBatch(lead, jobs) {
+  if (!jobs.length) { lead.busy = true; lead.worker.postMessage({ type: 'advance', results: [] }); return; }
+  pool.batch = { jobs, next: 0, redo: [], left: jobs.length, results: new Array(jobs.length).fill(null) };
+  pump();
+}
+
+function jobDone(w, value) {
+  const b = pool.batch, id = w.job;
+  w.job = null;
+  if (!b) return;
+  b.results[id] = value;
+  b.left -= 1;
+  if (pool.stage) {
+    const { from, to, text } = pool.stage, done = b.jobs.length - b.left;
+    setStage(from + (to - from) * done / b.jobs.length, `${text} ${done}/${b.jobs.length}`);
+  }
+  if (b.left === 0) {
+    const lead = pool.workers.find(x => x.lead);
+    pool.batch = null;
+    lead.busy = true;
+    lead.worker.postMessage({ type: 'advance', results: b.results });
+  } else pump();
+}
+
+/* 돕던 워커가 멈추면 맡긴 조각을 다시 대기열에 넣고, 첫 워커가 멈추면 실행을 끝낸다 */
+function lost(w, message) {
+  w.worker.terminate();
+  pool.workers = pool.workers.filter(x => x !== w);
+  if (w.lead) {
+    if (state.running) { finishRun(); showError(explain(message)); $('progress').hidden = true; }
+    dropPool();
+    return;
+  }
+  if (pool.batch && w.job !== null) pool.batch.redo.push(w.job);
+  pump();
+}
+
+function handle(w, msg) {
+  if (msg.type === 'ready') {
+    w.ready = true;
+    if (w.lead) for (let i = pool.workers.length; i < poolSize(); i++) addWorker(false);
+    if (state.running && pool.table && !w.lead) prepareWorker(w);
+    return;
+  }
+  if (msg.type === 'table') {
+    state.table = { key: pool.reading.key, table: msg.table };
+    if (state.running) launch(pool.reading.cfg);
+    return;
+  }
+  if (msg.type === 'unreadable') {
     finishRun();
-    showError(explain(msg.message));
-    if (msg.trace) addLog(msg.trace);
+    showError(msg.message);
     $('progress').hidden = true;
-    dropWorker();
+    return;
+  }
+  if (msg.type === 'prepared') { w.prepared = true; pump(); return; }
+  if (msg.type === 'jobs') { w.busy = false; startBatch(w, msg.jobs); return; }
+  if (msg.type === 'result') { jobDone(w, msg.value); return; }
+  if (msg.type === 'log' && w.lead && state.running) { addLog(msg.text); track(msg.text); return; }
+  if (msg.type === 'failed') {
+    if (msg.trace) addLog(msg.trace);
+    lost(w, msg.message);
+    return;
   }
   if (msg.type === 'done') {
+    w.busy = false;
     const job = state.job;
     finishRun();
     setStage(1, '완료');
@@ -390,19 +469,13 @@ function handle(msg) {
 }
 
 /* recon3d.py의 진행 출력에서 단계를 읽는다 */
-const cand = { n: 1, i: 1 };
-function fitStage(done, text) {
-  const prefix = cand.n > 1 ? `후보 ${cand.i}/${cand.n} ` : '';
-  setStage(0.06 + 0.88 * (cand.i - 1 + done) / cand.n, prefix + text);
-}
 function track(line) {
-  let m;
-  if (/불러오는 중/.test(line)) setStage(0.04, '데이터 읽는 중');
-  else if ((m = line.match(/^후보 (\d+)개/))) { cand.n = Number(m[1]); cand.i = 0; }
-  else if (/^== 후보/.test(line)) { cand.i += 1; fitStage(0, '경로 맞춤'); }
-  else if ((m = line.match(/1단계 (\d+)\/(\d+)/))) fitStage(0.8 * m[1] / m[2], `경로 맞춤 ${m[1]}/${m[2]}`);
-  else if ((m = line.match(/2단계 (\d+)\/(\d+)/))) fitStage(0.8 + 0.2 * m[1] / m[2], `정밀 맞춤 ${m[1]}/${m[2]}`);
-  else if (/굵기 추정 중/.test(line)) setStage(0.96, '내경 추정');
+  if (/^1단계/.test(line)) pool.stage = { from: 0.08, to: 0.6, text: '경로 찾기' };
+  else if (/^2단계/.test(line)) pool.stage = { from: 0.6, to: 0.8, text: '좋은 답 다듬기' };
+  else if (/^3단계/.test(line)) pool.stage = { from: 0.8, to: 0.92, text: '마무리' };
+  else if (/굵기 추정 중/.test(line)) { pool.stage = null; setStage(0.94, '내경 추정'); return; }
+  else return;
+  setStage(pool.stage.from, pool.stage.text);
 }
 
 function explain(message) {
@@ -432,7 +505,8 @@ function beginRun() {
   $('progress').hidden = false;
   $('logBox').hidden = false;
   $('stopBtn').hidden = false;
-  setStage(0.02, '실행 환경 준비');
+  setStage(0.02, '시작');
+  pauseView(true);
   const started = performance.now();
   const tick = () => {
     const s = Math.floor((performance.now() - started) / 1000);
@@ -443,9 +517,17 @@ function beginRun() {
   validate();
 }
 
+/* 계산 중에는 결과 3D 화면을 멈춰 계산이 쓸 자원을 비운다 */
+function pauseView(paused) {
+  $('viewer').hidden = paused || !state.result;
+  $('empty').hidden = !paused && !!state.result;
+  $('empty').textContent = paused ? '복원 중' : '결과 없음';
+}
+
 function finishRun() {
   state.running = false;
   clearInterval(clockTimer);
+  pauseView(false);
   $('stopBtn').hidden = true;
   validate();
 }
@@ -453,16 +535,30 @@ function finishRun() {
 function run() {
   if (checkConfig().length || !state.file) return;
   state.job = { run: state.cfg.run, title: state.cfg.title || '', csv: state.file.name };
+  const cfg = clone(state.cfg), columns = wantedColumns(cfg), key = columns.join('|');
   beginRun();
-  startWorker();
-  state.worker.postMessage({ type: 'run', file: state.file, cfg: clone(state.cfg) });
+  startPool();
+  if (state.table && state.table.key === key) { launch(cfg); return; }
+  setStage(0.03, '측정 파일 읽는 중');
+  pool.reading = { key, cfg };
+  pool.workers[0].worker.postMessage({ type: 'read', file: state.file, columns });
+}
+
+function launch(cfg) {
+  pool.table = state.table.table; pool.cfg = cfg; pool.stage = null; pool.batch = null;
+  setStage(0.06, '실행 환경 준비');
+  for (const w of pool.workers) {
+    w.prepared = false; w.job = null; w.busy = false;
+    if (w.ready || w.lead) prepareWorker(w);
+  }
 }
 
 function stop() {
-  dropWorker();
+  dropPool();
   finishRun();
   $('progress').hidden = true;
   addLog('중단');
+  startPool();
 }
 
 /* ---------- 결과 ---------- */
@@ -621,5 +717,6 @@ async function main() {
   $('preset').replaceChildren(...state.presets.map(p => new Option(p.label, p.id)));
   await usePreset(state.presets[0].id);
   await loadResults();
+  startPool();
 }
 main();

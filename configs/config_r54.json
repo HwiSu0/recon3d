@@ -14,7 +14,6 @@
   "upstream_len": 110,
   "outlet_len": 30,
   "drift": true,
-  "starts": 16,
   "seed": 1,
   "bin": 0.5,
   "ds": 0.25,

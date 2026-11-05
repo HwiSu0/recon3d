@@ -15,7 +15,6 @@
   "outlet_len": 20,
   "truth": [[[0, 4, 16.5], [10, 3, 16]]],
   "drift": true,
-  "starts": 16,
   "seed": 1,
   "bin": 0.5,
   "ds": 0.25,

@@ -22,6 +22,7 @@ import recon3d as R
 
 SPEED_GRID = np.exp(np.linspace(np.log(0.3), np.log(30.0), 13))   # cm/s
 RESOLVE_SIGMA = 3.0      # U/2, 2U에서 이만큼 나빠져야 속도가 정해졌다고 본다
+MAX_REL_ERR = 0.5
 FLOW_REL_ERR = 0.05      # 유량 측정의 상대 불확도(눈금 읽기와 시간 재기 가정)
 
 
@@ -35,16 +36,13 @@ class FrontModel:
         self.oi = getattr(model, 'oi', 0)
         self.oa = getattr(model, 'oa', True)
         P = model.paths(nodes)
-        pts, self.stem_s, self.LJ = P['stem']
-        self.stem_G = g.unit_field(pts) if len(pts) else None
-        self.br = [(g.unit_field(p) if len(p) else None, s, L) for p, s, L in P['br']]
+        self.stem_G, self.stem_s, self.LJ = P['stem']
+        self.br = P['br']
         if self.kind == 'step':
             G, s, L = self.br[0]
             self.sP = float(nodes['sf'] * L)
             self.L = L
-            m = s < self.sP
-            self.before = ({k: v[m] for k, v in G.items()}, s[m])
-            self.after = ({k: v[~m] for k, v in G.items()}, s[~m])
+            self.mix = np.clip((s - self.sP) * len(s) / L + 0.5, 0, 1)
             self.lengths = [self.sP, L - self.sP]
             self.reach = [self.sP, L]
         elif self.kind == 'single':
@@ -54,8 +52,7 @@ class FrontModel:
             self.lengths = [self.LJ] + [b[2] for b in self.br]
             self.reach = [self.LJ] + [self.LJ + b[2] for b in self.br]
         if self.kind == 'loop':
-            mp, self.merge_s, self.LM = P['merge']
-            self.merge_G = g.unit_field(mp) if len(mp) else None
+            self.merge_G, self.merge_s, self.LM = P['merge']
         self.n = len(self.lengths)
 
     def split(self, q):
@@ -65,13 +62,8 @@ class FrontModel:
     def predict(self, q, tt):
         t0, Us, lams, tau = self.split(q)
         g = self.g
-        out = {k: np.zeros((len(tt), 3)) for k in g.sensors}
-        sig = lambda x: 0.5 * (1 + np.tanh(x / (2 * tau)))
-
-        def add(G, tarr, lam):
-            L = lam * sig(tt[:, None] - tarr[None])
-            for k in out:
-                out[k] += L @ G[k]
+        res = np.zeros((len(tt), g.nc))
+        add = lambda G, tarr, lam: R.front_sum(res, tt, tau, G, tarr, lam)
         U0, lam0 = Us[0], lams[0]
         add(g.up_G, t0 + g.up_s / U0, lam0)
         so = g.out_pts[self.oi][1]
@@ -79,32 +71,27 @@ class FrontModel:
             G, s, L = self.br[0]
             add(G, t0 + s / U0, lam0)
             add(g.out_G[self.oi], t0 + (L + so) / U0, lam0)
-            return out
-        if self.kind == 'step':
+        elif self.kind == 'step':
             tP = t0 + self.sP / U0
-            add(self.before[0], t0 + self.before[1] / U0, lam0)
-            add(self.after[0], tP + (self.after[1] - self.sP) / Us[1], lams[1])
+            G, s, _ = self.br[0]
+            add(G, np.where(s < self.sP, t0 + s / U0, tP + (s - self.sP) / Us[1]), lam0 + (lams[1] - lam0) * self.mix)
             add(g.out_G[self.oi], tP + (self.L - self.sP + so) / Us[1], lams[1] if self.oa else lam0)
-            return out
-        if self.stem_G is not None:
+        else:
             add(self.stem_G, t0 + self.stem_s / U0, lam0)
-        tJ = t0 + self.LJ / U0
-        if self.kind == 'loop':
-            arrive = []
-            for k, (G, s, Lb) in enumerate(self.br):
-                if G is not None:
+            tJ = t0 + self.LJ / U0
+            if self.kind == 'loop':
+                arrive = []
+                for k, (G, s, Lb) in enumerate(self.br):
                     add(G, tJ + s / Us[k + 1], lams[k + 1])
-                arrive.append(tJ + Lb / Us[k + 1])
-            tJ2 = min(arrive)
-            if self.merge_G is not None:
+                    arrive.append(tJ + Lb / Us[k + 1])
+                tJ2 = min(arrive)
                 add(self.merge_G, tJ2 + self.merge_s / U0, lam0)
-            add(g.out_G[self.oi], tJ2 + (self.LM + so) / U0, lam0)
-            return out
-        for k, (G, s, Lb) in enumerate(self.br):
-            if G is not None:
-                add(G, tJ + s / Us[k + 1], lams[k + 1])
-            add(g.out_G[k], tJ + (Lb + g.out_pts[k][1]) / Us[k + 1], lams[k + 1])
-        return out
+                add(g.out_G[self.oi], tJ2 + (self.LM + so) / U0, lam0)
+            else:
+                for k, (G, s, Lb) in enumerate(self.br):
+                    add(G, tJ + s / Us[k + 1], lams[k + 1])
+                    add(g.out_G[k], tJ + (Lb + g.out_pts[k][1]) / Us[k + 1], lams[k + 1])
+        return g.split(res)
 
     def bounds(self):
         n = self.n
@@ -168,7 +155,7 @@ class Fitter:
             z = x.copy(); z[free] = y
             return self.f(z)
         y0 = np.clip(x[free], self.lo[free] + 1e-6, self.hi[free] - 1e-6)
-        s = least_squares(g, y0, bounds=(self.lo[free], self.hi[free]), max_nfev=nfev)
+        s = least_squares(g, y0, bounds=(self.lo[free], self.hi[free]), max_nfev=nfev, ftol=1e-6, xtol=1e-5)
         z = x.copy(); z[free] = s.x
         return z, 2 * s.cost, s
 
@@ -177,20 +164,20 @@ class Fitter:
         tail = [u] * n + [0.1] * n + [1.0]
         return [[t] + tail for t in (self.t_on - 6, self.t_on - 2, self.t_on + 1)]
 
-    def best_at_common_speed(self, u):
-        best = None
-        fixed = {1 + i: u for i in range(self.front.n)}
-        for x0 in self.start(u):
-            x, c, _ = self.fit(x0, fixed)
-            if best is None or c < best[1]:
-                best = (x, c)
-        return best
+    def at_speed(self, u, x0):
+        return self.fit(x0, {1 + i: u for i in range(self.front.n)})[:2]
 
     def best_overall(self):
-        grid = [self.best_at_common_speed(u) for u in SPEED_GRID]
-        x, c, u = min(((g[0], g[1], u) for g, u in zip(grid, SPEED_GRID)), key=lambda z: z[1])
-        z, c2, s = self.fit(x, nfev=120)
-        return (z, c2, s) if c2 <= c else (x, c, s)
+        """속도 격자마다 도착 시각 하나로 맞춘 뒤, 잘 맞은 속도만 다른 도착 시각에서도 맞춘다."""
+        first = [self.at_speed(u, self.start(u)[1]) for u in SPEED_GRID]
+        top = np.argsort([g[1] for g in first])[:3]
+        best = min(first, key=lambda g: g[1])
+        for j in top:
+            for x0 in self.start(SPEED_GRID[j])[::2]:
+                g = self.at_speed(SPEED_GRID[j], x0)
+                if g[1] < best[1]: best = g
+        z, c2, s = self.fit(best[0], nfev=120)
+        return (z, c2, s) if c2 <= best[1] else (best[0], best[1], s)
 
     def profile(self, x, idx):
         """속도 하나를 격자로 고정하고 나머지를 다시 맞춘 chi2. 가까운 격자의 답에서 이어 맞춘다."""
@@ -216,10 +203,10 @@ def refine(fitter, x, idx):
     return float(u0 * math.exp(shift)), float(a)
 
 
-def fit_window(cfg, front, tt, data, t_on, a, b):
+def fit_window(cfg, front, tt, data, t_on, a, b, x0=None):
     tw, dw = window_data(tt, data, a, b)
     fitter = Fitter(front, cfg, tw, dw, t_on)
-    return fitter, fitter.best_overall()
+    return fitter, (fitter.best_overall() if x0 is None else fitter.fit(x0, nfev=120))
 
 
 def nodes_from(cfg, model, best_nodes):
@@ -279,7 +266,7 @@ def measure(cfg, tt, data, I, model, nodes, path_kind):
     end = t_on + span
 
     # 2) 그 창에서 다시 맞춘다
-    fitter, (x, c, s) = fit_window(cfg, front, tt, data, t_on, start, end)
+    fitter, (x, c, s) = fit_window(cfg, front, tt, data, t_on, start, end, x)
     infl = residual_inflation(s.fun, fitter.axes)
     names, Qs, dset = piece_info(cfg, model, n)
     windows = {}
@@ -317,6 +304,8 @@ def measure(cfg, tt, data, I, model, nodes, path_kind):
                 if used * k > 3 and t_on + used * k <= last:
                     spread = max(spread, abs(math.log(at_window(used * k)[1][idx] / U)))
         rel = math.hypot(stat, spread) if stat is not None else None
+        if rel is None or rel >= MAX_REL_ERR:      # 불확도가 이렇게 크면 값을 낼 수 없다
+            resolved = False
         piece = {'name': names[i], 'U': round(U, 3), 'resolved': resolved, 'L_cm': round(float(front.lengths[i]), 2),
                  'profile': {'U': [round(float(u), 3) for u in SPEED_GRID], 'dchi2': [round(float(v), 2) for v in dchi]},
                  'd_set_mm': dset[i], 'Q_mL_s': Qs[i]}

@@ -18,7 +18,7 @@ recon3d.py - 자기장 측정으로 숨은 통로의 3D 경로를 복원하는 �
 좌표: 입력은 (a, b, c) cm = (입구면에서 출구 쪽, 앞면에서 안쪽, 탁자에서 높이).
 """
 import sys, os, json, math, time
-import numpy as np, pandas as pd
+import numpy as np
 from scipy.optimize import least_squares
 from scipy.special import ellipk, ellipe
 from contextlib import contextmanager
@@ -66,15 +66,33 @@ def best_psi(x, y, u, w=None):
     return x @ rot_axis(u, psi).T, psi
 
 # ---------------- data ----------------
-def load(cfg):
-    run = cfg['run']; ids = cfg['ids']
+def read_table(cfg):
+    """Run의 열을 {열 이름: 값}으로 읽는다. 웹은 필요한 열만 숫자로 잘라 넘겨 주므로 pandas를 쓰지 않는다."""
+    run = cfg['run']; tb = cfg.get('table')
+    if tb:
+        v = np.fromfile(tb['path'], dtype=np.float64).reshape(-1, len(tb['columns']))
+        return {c: v[:, i] for i, c in enumerate(tb['columns'])}
+    import pandas as pd
     df = pd.read_csv(cfg['csv'], encoding='utf-8-sig', low_memory=False, usecols=lambda c: c.endswith(f'Run #{run}'))
     if f'Time (s) Run #{run}' not in df.columns:
         cols = pd.read_csv(cfg['csv'], encoding='utf-8-sig', nrows=0).columns
         runs = sorted({int(c.split('Run #')[1]) for c in cols if 'Run #' in c})
         sys.exit(f"[오류] CSV에 Run #{run} 데이터가 없어요. 이 파일에 있는 Run 번호: {runs}")
-    t = df[f'Time (s) Run #{run}'].dropna().values
-    I = df[f'Output Current (A) Run #{run}'].dropna().values
+    return {c: df[c].values.astype(float) for c in df.columns}
+
+def bin_mean(t, v, a, dt):
+    """시각이 [a, a + dt)인 값들의 평균. t는 커지는 순서."""
+    i0 = np.searchsorted(t, a, 'left'); i1 = np.searchsorted(t, a + dt, 'left')
+    C = np.vstack([np.zeros((1, v.shape[1])), np.cumsum(v, 0)])
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return (C[i1] - C[i0]) / (i1 - i0)[:, None]
+
+def load(cfg):
+    run = cfg['run']; ids = cfg['ids']
+    tab = read_table(cfg)
+    col = lambda name: tab[name][~np.isnan(tab[name])]
+    t = col(f'Time (s) Run #{run}')
+    I = col(f'Output Current (A) Run #{run}')
     n = min(len(t), len(I)); t = t[:n]; I = I[:n]
     b0a, b0b = cfg.get('baseline', [2, 12])
     m0 = (t > b0a) & (t < b0b); Iref = I[m0].mean()
@@ -83,13 +101,13 @@ def load(cfg):
     edges = np.arange(t0, t1 + 1e-9, dt); tc = (edges[:-1] + edges[1:]) / 2
     data = {}
     for k, s in ids.items():
-        B = np.stack([df[f'{c} Magnetic Field Strength, {s} (G) Run #{run}'].dropna().values for c in 'XYZ'], 1)[:n] * 100
+        B = np.stack([col(f'{c} Magnetic Field Strength, {s} (G) Run #{run}')[:n] for c in 'XYZ'], 1) * 100
         b0 = B[m0].mean(0); u = b0 / np.linalg.norm(b0); g = np.linalg.norm(b0) / Iref
         dB = B - np.outer(g * (I - Iref), u) - b0
-        V = np.array([dB[(t >= a) & (t < a + dt)].mean(0) for a in edges[:-1]])
+        V = bin_mean(t, dB, edges[:-1], dt)
         # 잡음: 기준 구간의 0.5초 평균값들이 (직선 추세를 뺀 뒤) 흔들리는 정도
         e0 = np.arange(b0a, b0b - dt + 1e-9, dt)
-        Vb = np.array([dB[(t >= a) & (t < a + dt)].mean(0) for a in e0])
+        Vb = bin_mean(t, dB, e0, dt)
         if len(Vb) >= 4:
             A = np.stack([np.ones(len(e0)), e0 - e0.mean()], 1)
             rr = Vb - A @ np.linalg.lstsq(A, Vb, rcond=None)[0]
@@ -104,17 +122,21 @@ def load(cfg):
     return tc, data, Iref
 
 # ---------------- geometry ----------------
-LUMP_NEAR_CM = 20.0; LUMP_STEP_CM = 2.0; CURVE_SUB = 16
+# 상자에서 멀수록 호스 조각을 크게 묶는다: (입구나 출구에서의 거리 cm, 묶는 길이 cm), None이면 나누는 간격 그대로
+BANDS_FINE = ((6, None), (20, 1.0), (1e9, 5.0))
+BANDS_COARSE = ((4, None), (15, 1.5), (1e9, 5.0))
+CURVE_SUB = 16; HERMITE = {}
 
 class Geometry:
-    def __init__(self, cfg, I):
-        self.I = I; self.ds = cfg.get('ds', 0.25); self.curve = cfg.get('curve', True)
+    def __init__(self, cfg, I, bands=BANDS_FINE):
+        self.I = I; self.ds = cfg.get('ds', 0.25); self.curve = cfg.get('curve', True); self.bands = bands
         self.inlet = abc2lab(cfg['inlet'])
         self.outlets = [abc2lab(o) for o in cfg['outlets']]
         self.up_dir = np.array(cfg.get('upstream_dir_abc', [-1, 0, 0]), float)[[0, 2, 1]]
         self.out_dir = np.array(cfg.get('outlet_dir_abc', [1, 0, 0]), float)[[0, 2, 1]]
         self.L_up = cfg.get('upstream_len', 40.0); self.L_out = cfg.get('outlet_len', 20.0)
         self.sensors = {k: abc2lab(v) for k, v in cfg['sensors'].items()}
+        self.S = np.array(list(self.sensors.values())); self.nc = 3 * len(self.S); self.pieces = {}
         # fixed parts (precomputed): upstream hose and outside outlet hoses
         s = np.arange(-self.L_up, 0, self.ds) + self.ds / 2
         self.up_pts = self.inlet[None] + np.outer(-s, self.up_dir / np.linalg.norm(self.up_dir))
@@ -126,20 +148,36 @@ class Geometry:
             G, sl = self.lump(self.unit_field(p), so, so)
             self.out_pts.append((p, sl)); self.out_G.append(G)
 
-    def lump(self, G, s, dist, near=LUMP_NEAR_CM, step=LUMP_STEP_CM):
+    def lump(self, G, s, dist):
         """상자에서 먼 호스는 신호가 작고 천천히 변하므로 조각을 묶어 계산량을 줄인다."""
-        n = max(1, int(round(step / self.ds)))
-        groups = [[i] for i in np.where(dist <= near)[0]]
-        far = np.where(dist > near)[0]
-        groups += [list(far[i:i + n]) for i in range(0, len(far), n)]
-        return {k: np.array([v[g].sum(0) for g in groups]) for k, v in G.items()}, np.array([s[g].mean() for g in groups])
+        order = np.argsort(dist); d = dist[order]; groups = []; lo = -1.0
+        for up, width in self.bands:
+            m = order[(d > lo) & (d <= up)]; lo = up
+            n = max(1, int(round((width or self.ds) / self.ds)))
+            groups += [m[i:i + n] for i in range(0, len(m), n)]
+        return np.array([G[g].sum(0) for g in groups]), np.array([s[g].mean() for g in groups])
 
     def unit_field(self, P):
-        B0 = B0lab(P, self.I); G = {}
-        for k, S in self.sensors.items():
-            r = S[None] - P; rn = np.linalg.norm(r, axis=1); rh = r / rn[:, None]
-            G[k] = (self.ds / (4 * np.pi * rn ** 3))[:, None] * (3 * np.sum(B0 * rh, 1)[:, None] * rh - B0)
-        return G
+        """호스 조각(Np개)이 센서에 만드는 신호 계수. 행은 조각, 열은 센서별 x, y, z."""
+        B0 = B0lab(P, self.I)
+        r = self.S[:, None] - P[None]; r2 = np.sum(r * r, 2)
+        G = (self.ds / (4 * np.pi * r2 * np.sqrt(r2)))[:, :, None] * (3 * (np.sum(B0[None] * r, 2) / r2)[:, :, None] * r - B0[None])
+        return G.transpose(1, 0, 2).reshape(len(P), self.nc)
+
+    def split(self, out):
+        return {k: out[:, 3 * i:3 * i + 3] for i, k in enumerate(self.sensors)}
+
+    def piece(self, nodes):
+        """호스 한 토막의 (계수, 위치, 길이). 끝점이 그대로면 다시 계산하지 않는다."""
+        key = (self.curve, b''.join(n.tobytes() for n in nodes))
+        v = self.pieces.get(key)
+        if v is None:
+            pts, s, L, dl = self.polyline(nodes)
+            # 점 수는 정수라서 호스 길이를 실제 간격으로 재야 경로가 조금 바뀔 때 신호가 튀지 않는다
+            v = (self.unit_field(pts) * (dl / self.ds)[:, None] if len(pts) else None, s, L)
+            if len(self.pieces) >= 64: self.pieces.pop(next(iter(self.pieces)))
+            self.pieces[key] = v
+        return v
 
     def curve_pts(self, nodes, sub=CURVE_SUB):
         """점들을 지나는 매끈한 곡선(3차 에르미트). 상자 구멍에서는 호스가 벽에 수직으로 드나든다."""
@@ -152,33 +190,43 @@ class Geometry:
         if self.curve != 'free':
             if np.array_equal(nodes[0], self.inlet): tang[0] = -unit(self.up_dir)
             if any(np.array_equal(nodes[-1], o) for o in self.outlets): tang[-1] = unit(self.out_dir)
-        u = (np.arange(sub) / sub)[:, None]
-        h00 = 2 * u ** 3 - 3 * u ** 2 + 1; h10 = u ** 3 - 2 * u ** 2 + u; h01 = 1 - h00; h11 = u ** 3 - u ** 2
+        h = HERMITE.get(sub)
+        if h is None:
+            u = (np.arange(sub) / sub)[:, None]
+            h00 = 2 * u ** 3 - 3 * u ** 2 + 1
+            h = HERMITE[sub] = (h00, u ** 3 - 2 * u ** 2 + u, 1 - h00, u ** 3 - u ** 2)
         out = []
         for a, b, ta, tb in zip(nodes[:-1], nodes[1:], tang[:-1], tang[1:]):
             L = np.linalg.norm(b - a)
-            out.append(h00 * a + h10 * (L * ta) + h01 * b + h11 * (L * tb))
+            out.append(h[0] * a + h[1] * (L * ta) + h[2] * b + h[3] * (L * tb))
         out.append(nodes[-1][None])
         return np.concatenate(out)
 
     def polyline(self, nodes):
+        """경로를 일정한 간격으로 나눈 점, 호스를 따라 잰 위치, 전체 길이, 점마다의 호스 길이"""
+        Q = self.curve_pts(nodes)
+        if len(Q) < 2: return np.zeros((0, 3)), np.zeros(0), 0.0, np.zeros(0)
+        cum = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(Q, axis=0), axis=1))]; L = cum[-1]
+        if L < 1e-6: return np.zeros((0, 3)), np.zeros(0), 0.0, np.zeros(0)
         if self.curve:
-            Q = self.curve_pts(nodes)
-            if len(Q) < 2: return np.zeros((0, 3)), np.zeros(0), 0.0
-            cum = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(Q, axis=0), axis=1))]; L = cum[-1]
-            if L < 1e-6: return np.zeros((0, 3)), np.zeros(0), 0.0
             n = max(1, int(round(L / self.ds))); s = (np.arange(n) + 0.5) * L / n
-            return np.stack([np.interp(s, cum, Q[:, k]) for k in range(3)], 1), s, L
-        pts = []; ss = []; s0 = 0.0
-        for a, b in zip(nodes[:-1], nodes[1:]):
-            L = np.linalg.norm(b - a)
-            if L < 1e-6: continue
-            n = max(1, int(round(L / self.ds))); u = (np.arange(n) + 0.5) / n
-            pts.append(a[None] + np.outer(u, b - a)); ss.append(s0 + u * L); s0 += L
-        if not pts: return np.zeros((0, 3)), np.zeros(0), 0.0
-        return np.concatenate(pts), np.concatenate(ss), s0
+            return np.stack([np.interp(s, cum, Q[:, k]) for k in range(3)], 1), s, L, np.full(n, L / n)
+        ss = []; dl = []
+        for a, b in zip(cum[:-1], cum[1:]):
+            if b - a < 1e-6: continue
+            n = max(1, int(round((b - a) / self.ds)))
+            ss.append(a + (np.arange(n) + 0.5) * (b - a) / n); dl.append(np.full(n, (b - a) / n))
+        s = np.concatenate(ss)
+        return np.stack([np.interp(s, cum, Q[:, k]) for k in range(3)], 1), s, L, np.concatenate(dl)
 
 # ---------------- model ----------------
+EMPTY = (None, np.zeros(0), 0.0)
+
+def front_sum(out, tt, tau, G, tarr, lam):
+    """앞머리가 시각 tarr에 지나가는 호스 조각들의 신호를 더한다. lam은 수 하나 또는 조각별 배열."""
+    if G is None: return
+    out += (0.5 * lam * (1 + np.tanh((tt[:, None] - tarr[None]) / (2 * tau)))) @ G
+
 class Model:
     """nb = number of branches (= number of outlets). nb=1 : inlet -> C -> outlet.
     nb>=2 : inlet -> J (junction) -> C_k -> outlet_k."""
@@ -261,31 +309,23 @@ class Model:
 
     def paths(self, p):
         g = self.g
-        J = p['J'] if self.nb >= 2 else None
         if self.nb == 1:
-            pts, s, L = g.polyline([g.inlet, p['C'][0], g.outlets[0]])
-            return {'stem': (np.zeros((0, 3)), np.zeros(0), 0.0), 'br': [(pts, s, L)]}
-        stem = g.polyline([g.inlet, J])
-        br = [g.polyline([J, p['C'][k], g.outlets[k]]) for k in range(self.nb)]
-        return {'stem': stem, 'br': br}
+            return {'stem': EMPTY, 'br': [g.piece([g.inlet, p['C'][0], g.outlets[0]])]}
+        J = p['J']
+        return {'stem': g.piece([g.inlet, J]), 'br': [g.piece([J, p['C'][k], g.outlets[k]]) for k in range(self.nb)]}
 
     def predict(self, q, tt):
-        p = self.unpack(q); g = self.g; P = self.paths(p)
-        tau = p['tau']; sig = lambda x: 0.5 * (1 + np.tanh(x / (2 * tau)))
-        out = {k: np.zeros((len(tt), 3)) for k in g.sensors}
-        def add(G, tarr, lam):
-            L = lam * sig(tt[:, None] - tarr[None])           # (Nt, Np)
-            for k in out: out[k] += L @ G[k]
-        # upstream
-        add(g.up_G, p['t0'] + g.up_s / p['U0'], p['lam0'])
-        stem_pts, stem_s, LJ = P['stem']
-        if len(stem_pts): add(g.unit_field(stem_pts), p['t0'] + stem_s / p['U0'], p['lam0'])
-        tJ = p['t0'] + LJ / p['U0']
-        for k, (pts, s, Lb) in enumerate(P['br']):
-            if len(pts): add(g.unit_field(pts), tJ + s / p['U'][k], p['lam'][k])
-            op, so = g.out_pts[k]
-            add(g.out_G[k], tJ + (Lb + so) / p['U'][k], p['lam'][k])
-        return out
+        p = self.unpack(q); g = self.g; P = self.paths(p); tau = p['tau']; t0 = p['t0']; U0 = p['U0']
+        out = np.zeros((len(tt), g.nc))
+        front_sum(out, tt, tau, g.up_G, t0 + g.up_s / U0, p['lam0'])
+        G, s, LJ = P['stem']
+        front_sum(out, tt, tau, G, t0 + s / U0, p['lam0'])
+        tJ = t0 + LJ / U0
+        for k, (G, s, Lb) in enumerate(P['br']):
+            Uk = p['U'][k]; lk = p['lam'][k]
+            front_sum(out, tt, tau, G, tJ + s / Uk, lk)
+            front_sum(out, tt, tau, g.out_G[k], tJ + (Lb + g.out_pts[k][1]) / Uk, lk)
+        return g.split(out)
 
 class ModelLoop:
     """갈라졌다가 다시 모이는 관: 입구 -> J1(분기) -> 갈래 k (꺾이는 점 C_k) -> J2(합류) -> 출구 1개.
@@ -310,8 +350,8 @@ class ModelLoop:
         return np.array(lo, float), np.array(hi, float)
     def paths(self, p):
         g = self.g; O = g.outlets[self.oi]
-        return {'stem': g.polyline([g.inlet, p['J']]), 'br': [g.polyline([p['J'], p['C'][k], p['J2']]) for k in range(2)],
-                'merge': g.polyline([p['J2'], O])}
+        return {'stem': g.piece([g.inlet, p['J']]), 'br': [g.piece([p['J'], p['C'][k], p['J2']]) for k in range(2)],
+                'merge': g.piece([p['J2'], O])}
     def nodes(self, p):
         g = self.g; O = g.outlets[self.oi]; ch = lambda n: [lab2abc(x) for x in g.curve_pts(n)]
         return [ch([g.inlet, p['J']]), ch([p['J'], p['C'][0], p['J2']]), ch([p['J'], p['C'][1], p['J2']]), ch([p['J2'], O])]
@@ -335,25 +375,20 @@ class ModelLoop:
         Ug = float(np.exp(rng.uniform(np.log(0.7), np.log(7.0)))) if cfg.get('U_guess') is None else cfg['U_guess'] * rng.uniform(0.5, 2.0)
         return [tg, Ug, Ug * 0.6, Ug * 0.6, 0.1, 2.0] if self.tie else [tg, Ug, Ug * 0.6, Ug * 0.6, 0.1, 0.1, 0.1, 2.0]
     def predict(self, q, tt):
-        p = self.unpack(q); g = self.g; P = self.paths(p)
-        tau = p['tau']; sig = lambda x: 0.5 * (1 + np.tanh(x / (2 * tau)))
-        out = {k: np.zeros((len(tt), 3)) for k in g.sensors}
-        def add(G, tarr, lam):
-            L = lam * sig(tt[:, None] - tarr[None])
-            for k in out: out[k] += L @ G[k]
-        add(g.up_G, p['t0'] + g.up_s / p['U0'], p['lam0'])
-        sp, ss, LJ = P['stem']
-        if len(sp): add(g.unit_field(sp), p['t0'] + ss / p['U0'], p['lam0'])
-        tJ = p['t0'] + LJ / p['U0']; arr = []
-        for k, (pts, s, Lb) in enumerate(P['br']):
-            if len(pts): add(g.unit_field(pts), tJ + s / p['U'][k], p['lam'][k])
+        p = self.unpack(q); g = self.g; P = self.paths(p); tau = p['tau']; t0 = p['t0']; U0 = p['U0']; l0 = p['lam0']
+        out = np.zeros((len(tt), g.nc))
+        front_sum(out, tt, tau, g.up_G, t0 + g.up_s / U0, l0)
+        G, s, LJ = P['stem']
+        front_sum(out, tt, tau, G, t0 + s / U0, l0)
+        tJ = t0 + LJ / U0; arr = []
+        for k, (G, s, Lb) in enumerate(P['br']):
+            front_sum(out, tt, tau, G, tJ + s / p['U'][k], p['lam'][k])
             arr.append(tJ + Lb / p['U'][k])
         tJ2 = min(arr)
-        mp, ms, LM = P['merge']
-        if len(mp): add(g.unit_field(mp), tJ2 + ms / p['U0'], p['lam0'])
-        op, so = g.out_pts[self.oi]
-        add(g.out_G[self.oi], tJ2 + (LM + so) / p['U0'], p['lam0'])
-        return out
+        G, s, LM = P['merge']
+        front_sum(out, tt, tau, G, tJ2 + s / U0, l0)
+        front_sum(out, tt, tau, g.out_G[self.oi], tJ2 + (LM + g.out_pts[self.oi][1]) / U0, l0)
+        return g.split(out)
 
 class ModelStep:
     """중간에 굵어지는(또는 가늘어지는) 한 줄 관: 입구 -> (꺾이는 점 C) -> 출구, 관을 따라 sf 비율 지점 P에서 굵기가 바뀜.
@@ -380,8 +415,7 @@ class ModelStep:
         cum = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(Q, axis=0), axis=1))]; L = cum[-1]; target = p['sf'] * L
         return np.array([np.interp(target, cum, Q[:, k]) for k in range(3)]), L, target
     def paths(self, p):
-        pts, s, L = self.g.polyline(self._line(p))
-        return {'stem': (np.zeros((0, 3)), np.zeros(0), 0.0), 'br': [(pts, s, L)]}
+        return {'stem': EMPTY, 'br': [self.g.piece(self._line(p))]}
     def nodes(self, p):
         Q = self.g.curve_pts(self._line(p)); P, L, sP = self.point_at(p)
         cum = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(Q, axis=0), axis=1))]
@@ -400,25 +434,17 @@ class ModelStep:
         q = [tg, Ug, 0.05, 0.05 * r, 2.0]
         return q if self.tie else q + [Ug / r]
     def predict(self, q, tt):
-        p = self.unpack(q); g = self.g
-        tau = p['tau']; sig = lambda x: 0.5 * (1 + np.tanh(x / (2 * tau)))
-        out = {k: np.zeros((len(tt), 3)) for k in g.sensors}
-        def add(G, tarr, lam):
-            L = lam * sig(tt[:, None] - tarr[None])
-            for k in out: out[k] += L @ G[k]
+        p = self.unpack(q); g = self.g; tau = p['tau']; t0 = p['t0']
         U0, U1, l0, l1 = p['U0'], p['U'][0], p['lam0'], p['lam'][0]
-        add(g.up_G, p['t0'] + g.up_s / U0, l0)
-        pts, s, L = g.polyline(self._line(p)); sP = p['sf'] * L
-        if len(pts):
-            G = g.unit_field(pts); m = s < sP; tP = p['t0'] + sP / U0
-            tarr = np.where(m, p['t0'] + s / U0, tP + (s - sP) / U1)
-            Lm = np.where(m, l0, l1)
-            Ls = Lm[None] * sig(tt[:, None] - tarr[None])
-            for k in out: out[k] += Ls @ G[k]
-        op, so = g.out_pts[self.oi]
-        tP = p['t0'] + sP / U0
-        add(g.out_G[self.oi], tP + (L - sP + so) / U1, l1 if self.oa else l0)
-        return out
+        out = np.zeros((len(tt), g.nc))
+        front_sum(out, tt, tau, g.up_G, t0 + g.up_s / U0, l0)
+        G, s, L = g.piece(self._line(p)); sP = p['sf'] * L; tP = t0 + sP / U0
+        if G is not None:
+            # 굵기 바뀌는 점이 걸친 조각은 앞뒤 값을 나눠 가져서 P가 조금 움직일 때 신호가 튀지 않는다
+            mix = np.clip((s - sP) * len(s) / L + 0.5, 0, 1)
+            front_sum(out, tt, tau, G, np.where(s < sP, t0 + s / U0, tP + (s - sP) / U1), l0 + (l1 - l0) * mix)
+        front_sum(out, tt, tau, g.out_G[self.oi], tP + (L - sP + g.out_pts[self.oi][1]) / U1, l1 if self.oa else l0)
+        return g.split(out)
 
 def node_chains(model, p):
     """흐르는 순서대로 이은 점들 (lab 좌표). 사전 조건(곧게, 내리막)을 걸 때 씀."""
@@ -457,19 +483,34 @@ def make_model(kind, geo, cfg):
     m = Model(geo, nb, cfg['box'], cfg.get('phys'))
     return m
 
-def residuals(model, data, tt, rotfree=True, drift=False, tb=0.0, prior=None):
+def aligner(y, u, w, noise, dt, drift):
+    """best_psi, fit_one과 같은 식이다. 호스 모양이 바뀔 때마다 돌기 때문에 미리 계산할 수 있는 것은 미리 한다."""
+    Kt = np.array([[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]]).T; Pu = np.outer(u, u)
+    w2 = w * w; wy = w2[:, None] * y; wd = w * dt; wd2 = w2 * dt
+    den = max(wd @ dt, 1e-9); yv = wd @ y; sc = w[:, None] / noise
+    def run(x):
+        par = x @ Pu; per = x - par; cro = x @ Kt
+        A = np.sum(per * wy); B = np.sum(cro * wy)
+        if not drift:
+            psi = math.atan2(B, A)
+            return ((par + math.cos(psi) * per + math.sin(psi) * cro - y) * sc).ravel()
+        vp = wd2 @ per; vc = wd2 @ cro; ap = wd @ par; bp = wd @ per; cp = wd @ cro
+        d = np.zeros(3)
+        for _ in range(2):
+            psi = math.atan2(B - vc @ d, A - vp @ d); c = math.cos(psi); s = math.sin(psi)
+            d = (yv - ap - c * bp - s * cp) / den
+        return ((par + c * per + s * cro + np.outer(dt, d) - y) * sc).ravel()
+    return run
+
+def residuals(model, data, tt, drift=False, tb=0.0, prior=None):
     U = {k: B0lab(model.g.sensors[k], model.g.I)[0] for k in data}
     U = {k: v / np.linalg.norm(v) for k, v in U.items()}
     RA = {k: rot_align(data[k]['b0'], U[k] * np.linalg.norm(data[k]['b0'])) for k in data}
     Y = {k: data[k]['dB'] @ RA[k].T for k in data}
+    al = {k: aligner(Y[k], U[k], data[k]['w'], data[k]['noise'], tt - tb, drift) for k in data}
     def f(q):
-        pr = model.predict(q, tt); r = []
-        for k in data:
-            x = pr[k]; w = data[k]['w']; y = Y[k]
-            if drift:   # 천천히 변하는 센서 표류(기준 구간에서 0, 시간에 비례)를 같이 빼 줌
-                x = fit_one(x, y, U[k], w, rotfree, tt - tb)
-            elif rotfree: x, _ = best_psi(x, y, U[k], w)
-            r.append((((x - y) * w[:, None]) / data[k]['noise']).ravel())
+        pr = model.predict(q, tt)
+        r = [al[k](pr[k]) for k in data]
         if prior: r.append(prior_res(model, q, prior))
         return np.concatenate(r)
     return f, Y, U
@@ -490,45 +531,141 @@ def auto_t_on(tt, data):
     thr = s.min() + 0.3 * (s.max() - s.min())
     return float(tt[int(np.argmax(s > thr))])
 
-def fit(cfg, tt, data, geo, kind):
-    """여러 시작점에서 짧게 맞춰 본 뒤(1단계), 잘 맞은 몇 개만 끝까지 맞춤(2단계)."""
-    model = make_model(kind, geo, cfg)
-    b0a, b0b = cfg.get('baseline', [2, 12])
-    f, Y, U = residuals(model, data, tt, drift=cfg.get('drift', False), tb=(b0a + b0b) / 2, prior=cfg.get('prior'))
-    lo, hi = model.bounds()
-    rng = np.random.default_rng(cfg.get('seed', 0))
-    t_on = auto_t_on(tt, data)
-    tg_list = [t_on] + ([cfg['t_front_guess']] if cfg.get('t_front_guess') is not None else [])
-    print(f'  신호가 커지기 시작한 시각(자동): {t_on:.1f} s', flush=True)
-    starts = []
-    nstart = cfg.get('starts', 16) * (2 if model.kind == 'loop' else 1)
-    for i in range(nstart):
-        q = model.init_geom(rng, i)
-        q += model.tail_guess(cfg, tt, rng, tg_list[i % len(tg_list)])
-        starts.append(np.clip(np.array(q, float), lo + 1e-6, hi - 1e-6))
-    sols1 = []
-    t1 = time.time()
-    for i, q0 in enumerate(starts):
-        try:
-            sols1.append(least_squares(f, q0, bounds=(lo, hi), max_nfev=cfg.get('nfev1', 60), ftol=cfg.get('ftol1', 1e-3), xtol=cfg.get('xtol1', 1e-3)))
-        except Exception as e:
-            print(f'  시작점 {i + 1} 실패:', e, flush=True)
-        if (i + 1) % 4 == 0 or i + 1 == len(starts):
-            print(f'  1단계 {i + 1}/{len(starts)} ({time.time() - t1:.0f}초), 지금까지 최소 chi2/N = {min(2 * s.cost / len(s.fun) for s in sols1):.3f}', flush=True)
-    sols1.sort(key=lambda s: s.cost)
-    m = cfg.get('refine', 4); sols = []
-    for i, s in enumerate(sols1[:m]):
-        s2 = least_squares(f, s.x, bounds=(lo, hi), max_nfev=cfg.get('max_nfev', 400), ftol=cfg.get('ftol2', 1e-6))
-        sols.append(s2 if s2.cost <= s.cost else s)
-        print(f'  2단계 {i + 1}/{min(m, len(sols1))}: chi2/N = {2 * sols[-1].cost / len(s.fun):.3f}', flush=True)
-    sols += sols1[m:]
-    sols.sort(key=lambda s: s.cost)
-    return model, sols, Y, U, f
+def rebin(tt, data, k):
+    """이웃한 시간 구간 k개를 하나로 묶는다. 잡음은 sqrt(k)만큼 줄어든다."""
+    n = len(tt) // k; out = {}
+    for key, d in data.items():
+        w = d['w'][:n * k].reshape(n, k); V = d['dB'][:n * k].reshape(n, k, 3); sw = w.sum(1)
+        out[key] = {'b0': d['b0'], 'dB': (V * w[:, :, None]).sum(1) / np.maximum(sw, 1)[:, None],
+                    'noise': d['noise'] / math.sqrt(k), 'w': (sw > 0).astype(float)}
+    return tt[:n * k].reshape(n, k).mean(1), out
+
+class Sol:
+    def __init__(self, x, cost, fun): self.x = x; self.cost = cost; self.fun = fun
+
+class Search:
+    """구조 후보 하나를 맞춘다. 성긴 모델(coarse)로 답이 있는 곳을 찾고 원래 해상도(fine)로 마무리한다."""
+    def __init__(self, cfg, tt, data, I, kind):
+        self.cfg = cfg; self.tt = tt; self.data = data; self.I = I; self.kind = kind; self.lv = {}; self.q0 = None
+    def level(self, name):
+        if name not in self.lv:
+            c = self.cfg; b0a, b0b = c.get('baseline', [2, 12])
+            if name == 'fine': cc, tt, data, bands = c, self.tt, self.data, BANDS_FINE
+            else:
+                cc = dict(c); cc['ds'] = 2 * c.get('ds', 0.25); bands = BANDS_COARSE
+                tt, data = rebin(self.tt, self.data, c.get('coarse_bin', 2))
+            model = make_model(self.kind, Geometry(cc, self.I, bands), cc)
+            f, Y, U = residuals(model, data, tt, drift=c.get('drift', False), tb=(b0a + b0b) / 2, prior=c.get('prior'))
+            self.lv[name] = (model, f, Y, U)
+        return self.lv[name]
+    def starts(self):
+        if self.q0 is None:
+            cfg = self.cfg; model = self.level('fine')[0]; lo, hi = model.bounds()
+            rng = np.random.default_rng(cfg.get('seed', 0))
+            t_on = auto_t_on(self.tt, self.data)
+            tg = [t_on] + ([cfg['t_front_guess']] if cfg.get('t_front_guess') is not None else [])
+            self.q0 = []
+            for i in range(cfg.get('starts', 6) * (2 if model.nb >= 2 else 1)):
+                q = model.init_geom(rng, i) + model.tail_guess(cfg, self.tt, rng, tg[i % len(tg)])
+                self.q0.append(np.clip(np.array(q, float), lo + 1e-6, hi - 1e-6))
+        return self.q0
+    def solve(self, level, x, nfev, ftol, xtol=1e-3):
+        model, f = self.level(level)[:2]; lo, hi = model.bounds()
+        return least_squares(f, np.clip(x, lo, hi), bounds=(lo, hi), max_nfev=nfev, ftol=ftol, xtol=xtol)
+
+class Context:
+    """측정값과 후보 목록. 웹에서는 계산을 나눠 맡는 워커마다 하나씩 만든다."""
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.tt, self.data, self.I = load(cfg)
+        nb = len(cfg['outlets'])
+        names = cfg.get('outlet_names', [f'출구{i+1}' for i in range(nb)])
+        topo = cfg.get('topology', 'y' if nb >= 2 else 'auto')
+        # 출구 고르기: "exit": "auto"(출구마다 다 맞춰 보고 고름) 또는 출구 번호(0부터)
+        exit_sel = cfg.get('exit', 'auto' if (nb >= 2 and topo != 'y') else 0)
+        one = cfg.get('candidates', ['single', 'step', 'loop']) if topo == 'auto' else ([topo] if topo != 'y' else [])
+        exits = list(range(nb)) if exit_sel == 'auto' else [int(exit_sel)]
+        cands = [(k, [i]) for i in exits for k in one]
+        if topo == 'y' or (topo == 'auto' and nb >= 2 and cfg.get('try_y', True)): cands.append(('y', list(range(nb))))
+        self.all_names = names; self.cands = []
+        for kind, idx in cands:
+            c = dict(cfg); c['outlets'] = [cfg['outlets'][i] for i in idx]; c['outlet_names'] = [names[i] for i in idx]
+            label = KIND_NAME[kind] + (f' · {names[idx[0]]}' if (nb >= 2 and kind != 'y') else '')
+            self.cands.append({'kind': kind, 'idx': idx, 'cfg': c, 'label': label})
+        self.found = {}
+    def search(self, c):
+        if c not in self.found:
+            d = self.cands[c]; self.found[c] = Search(d['cfg'], self.tt, self.data, self.I, d['kind'])
+        return self.found[c]
+
+def do_job(ctx, job):
+    """계산 한 조각. 입력과 출력이 숫자뿐이라 다른 워커에 맡길 수 있고, 맡긴 순서와 상관없이 답이 같다."""
+    s = ctx.search(job['c']); cfg = s.cfg; st = job['stage']
+    try:
+        if st == 'score':
+            r = s.level('fine')[1](np.array(job['x'], float))
+            return {'x': job['x'], 'cost': 0.5 * float(r @ r)}
+        if st == 'scout': r = s.solve('coarse', s.starts()[job['i']], cfg.get('nfev1', 8), 1e-2)
+        elif st == 'settle': r = s.solve('coarse', np.array(job['x'], float), cfg.get('nfev2', 25), 1e-3)
+        else: r = s.solve('fine', np.array(job['x'], float), cfg.get('nfev3', 60), cfg.get('ftol3', 1e-6), 1e-5)
+        return {'x': [float(v) for v in r.x], 'cost': float(r.cost)}
+    except Exception as e:
+        print(f'  계산 한 조각 실패: {e}', flush=True)
+        return None
+
+def plan(ctx):
+    """맞춤의 순서. 할 일 목록을 내보내고 결과를 받아 다음으로 넘어간다."""
+    cfg = ctx.cfg; cands = ctx.cands; keep = cfg.get('keep', 3); top = cfg.get('polish', 2)
+    print(f'후보 {len(cands)}개', flush=True)
+    jobs = [{'stage': 'scout', 'c': c, 'i': i} for c in range(len(cands)) for i in range(len(ctx.search(c).starts()))]
+    print(f'1단계: 시작점 {len(jobs)}개', flush=True)
+    got = yield jobs
+    best = {c: [] for c in range(len(cands))}
+    for j, r in zip(jobs, got):
+        if r: best[j['c']].append(r)
+    for c in best: best[c].sort(key=lambda r: r['cost'])
+    jobs = [{'stage': 'settle', 'c': c, 'x': r['x']} for c in best for r in best[c][:keep]]
+    print(f'2단계: 답 {len(jobs)}개', flush=True)
+    got = yield jobs
+    for c in best:
+        best[c] = []
+    for j, r in zip(jobs, got):
+        if r: best[j['c']].append(r)
+    for c in best: best[c].sort(key=lambda r: r['cost'])
+    # 2단계에서 크게 뒤처진 후보는 마무리하지 않고 원래 해상도로 점수만 매긴다
+    low = min(r[0]['cost'] for r in best.values() if r)
+    near = [c for c in best if best[c] and best[c][0]['cost'] <= cfg.get('near', 1.5) * low]
+    jobs = [{'stage': 'polish', 'c': c, 'x': r['x']} for c in near for r in best[c][:top]]
+    jobs += [{'stage': 'score', 'c': c, 'x': best[c][0]['x']} for c in best if best[c] and c not in near]
+    print(f'3단계: 답 {len(jobs)}개', flush=True)
+    got = yield jobs
+    done = {c: [] for c in best}
+    for j, r in zip(jobs, got):
+        if r: done[j['c']].append(r)
+    results = []
+    for c, d in enumerate(cands):
+        if not done[c]: continue
+        s = ctx.search(c); model, f, Y, U = s.level('fine')
+        done[c].sort(key=lambda r: r['cost'])
+        x = np.array(done[c][0]['x']); r0 = f(x); Nk = len(r0); chi2 = float(r0 @ r0); npar = len(x)
+        results.append({**d, 'c': c, 'search': s, 'model': model, 'Y': Y, 'U': U, 'f': f, 'best': Sol(x, 0.5 * chi2, r0), 'rough': c not in near,
+                        'chi2_per_N': chi2 / Nk, 'bic': chi2 + npar * np.log(Nk), 'npar': npar})
+        print(f"   {d['label']}: chi2/N = {chi2 / Nk:.3f}, BIC = {chi2 + npar * np.log(Nk):.0f}", flush=True)
+    if not results: sys.exit('[오류] 어떤 시작점에서도 맞춤이 끝나지 않았어요.')
+    results.sort(key=lambda r: (r['rough'], r['bic']))
+    r0 = results[0]
+    # 고른 후보의 다른 답은 원래 해상도로 점수만 다시 매긴다
+    jobs = [{'stage': 'score', 'c': r0['c'], 'x': r['x']} for r in done[r0['c']][1:] + best[r0['c']][top:]]
+    got = yield jobs
+    Nf = len(r0['best'].fun)
+    rest = [Sol(np.array(r['x']), r['cost'], r0['best'].fun) for r in got if r]
+    rest.sort(key=lambda s: s.cost)
+    finish(ctx, results, [r0['best']] + rest)
 
 @contextmanager
 def as_written(g):
-    """실제 경로는 곡선으로 고치지 않고 적힌 그대로 쓴다."""
-    keep = g.curve; g.curve = False
+    """실제 경로는 적힌 점을 잇는 매끈한 곡선으로 쓴다. 구멍 방향을 강제하지 않으므로 두 점이면 직선이다."""
+    keep = g.curve; g.curve = 'free'
     try: yield
     finally: g.curve = keep
 
@@ -671,34 +808,19 @@ def main():
     if not os.path.exists(cfg['csv']):
         sys.exit(f"[오류] CSV 파일을 찾을 수 없어요: {cfg['csv']}  (recon3d.py와 같은 폴더에 넣었는지 확인)")
     print(f"Run #{cfg['run']} 불러오는 중: {cfg['csv']}", flush=True)
-    tt, data, I = load(cfg)
-    print(f"  시간 {tt[0]:.1f}~{tt[-1]:.1f}초, 전류 {I:.3f} A, 잡음(μT) " + ', '.join(f'{k} {d["noise"]:.2f}' for k, d in data.items()), flush=True)
-    print(f"경로 맞추는 중 (시작점 {cfg.get('starts', 10)}개, 보통 1분 안쪽)...", flush=True)
-    nb = len(cfg['outlets'])
-    all_names = cfg.get('outlet_names', [f'출구{i+1}' for i in range(nb)])
-    topo = cfg.get('topology', 'y' if nb >= 2 else 'auto')
-    # 출구 고르기: "exit": "auto"(출구마다 다 맞춰 보고 고름) 또는 출구 번호(0부터)
-    exit_sel = cfg.get('exit', 'auto' if (nb >= 2 and topo != 'y') else 0)
-    one = cfg.get('candidates', ['single', 'step', 'loop']) if topo == 'auto' else ([topo] if topo != 'y' else [])
-    exits = list(range(nb)) if exit_sel == 'auto' else [int(exit_sel)]
-    cands = [(k, [i]) for i in exits for k in one]
-    if topo == 'y' or (topo == 'auto' and nb >= 2 and cfg.get('try_y', True)): cands.append(('y', list(range(nb))))
-    results = []; geos = {}
-    print(f"후보 {len(cands)}개", flush=True)
-    for kind, idx in cands:
-        ccfg = dict(cfg); ccfg['outlets'] = [cfg['outlets'][i] for i in idx]; ccfg['outlet_names'] = [all_names[i] for i in idx]
-        key = tuple(idx)
-        if key not in geos: geos[key] = Geometry(ccfg, I)
-        label = KIND_NAME[kind] + (f' · {all_names[idx[0]]}' if (nb >= 2 and kind != 'y') else '')
-        print(f"== 후보: {label}", flush=True)
-        model, sols, Y, U, f = fit(ccfg, tt, data, geos[key], kind)
-        Nk = len(sols[0].fun); chi2 = 2 * sols[0].cost; npar = len(sols[0].x)
-        results.append({'kind': kind, 'label': label, 'idx': idx, 'cfg': ccfg, 'model': model, 'sols': sols, 'Y': Y, 'U': U, 'f': f,
-                        'chi2_per_N': chi2 / Nk, 'bic': chi2 + npar * np.log(Nk), 'npar': npar})
-        print(f"   {label}: chi2/N = {chi2 / Nk:.3f}, BIC = {chi2 + npar * np.log(Nk):.0f}", flush=True)
-    results.sort(key=lambda r: r['bic'])
-    r0 = results[0]; model, sols, Y, U, f = r0['model'], r0['sols'], r0['Y'], r0['U'], r0['f']
-    used_cfg = r0['cfg']; used_cfg['_all_outlets'] = cfg['outlets']; used_cfg['_all_names'] = all_names
+    ctx = Context(cfg)
+    print(f"  시간 {ctx.tt[0]:.1f}~{ctx.tt[-1]:.1f}초, 전류 {ctx.I:.3f} A, 잡음(μT) " + ', '.join(f'{k} {d["noise"]:.2f}' for k, d in ctx.data.items()), flush=True)
+    steps = plan(ctx); jobs = next(steps)
+    try:
+        while True: jobs = steps.send([do_job(ctx, j) for j in jobs])
+    except StopIteration:
+        pass
+
+def finish(ctx, results, sols):
+    """고른 답으로 표, 내경, 결과 파일을 만든다."""
+    cfg = ctx.cfg; tt = ctx.tt; data = ctx.data; I = ctx.I
+    r0 = results[0]; model, Y, U, f = r0['model'], r0['Y'], r0['U'], r0['f']
+    used_cfg = r0['cfg']; used_cfg['_all_outlets'] = cfg['outlets']; used_cfg['_all_names'] = ctx.all_names
     N = len(sols[0].fun)
     z = float(np.sum(np.concatenate([(Y[k] * data[k]['w'][:, None] / data[k]['noise']).ravel() for k in Y]) ** 2) / N)
     summ = summarize(model, sols[0], N); summ['chi2_per_N_no_iron_model'] = z
@@ -706,7 +828,7 @@ def main():
     summ['alternatives'] = [summarize(model, s, N) for s in sols[1:4]]
     if len(results) > 1:
         summ['topology_compare'] = [{'kind': r['kind'], 'name': r['label'], 'chi2_per_N': round(float(r['chi2_per_N']), 3),
-                                     'bic': round(float(r['bic']), 1), 'npar': r['npar']} for r in results]
+                                     'bic': round(float(r['bic']), 1), 'npar': r['npar'], 'rough': r['rough']} for r in results]
     summ['exit_used'] = used_cfg['outlet_names']
     if cfg.get('truth_points'):          # 실제 경로의 일부 점만 알 때 (예: 분기점, 합류점)
         tp = cfg['truth_points']; tpe = {}
@@ -725,6 +847,8 @@ def main():
         try:
             import thickness
             tcfg = dict(used_cfg)
+            # 적어 둔 실제 경로가 복원 경로보다 측정을 훨씬 못 맞추면 그 경로로 속도를 재지 않는다
+            if summ.get('chi2_per_N_truth_path', 0) > 1.25 * summ['chi2_per_N']: tcfg.pop('truth', None)
             flows = cfg.get('flow_mL_s') or []
             tcfg['flow_mL_s'] = [flows[i] if i < len(flows) else None for i in r0['idx']]
             best_p = model.unpack(sols[0].x)
