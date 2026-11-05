@@ -328,9 +328,10 @@ def measure(cfg, tt, data, I, model, nodes, path_kind):
     if n >= 2 and lam_err is not None:
         for k in range(1, n):
             rel = math.hypot(lam_err[k] / max(lam[k], 1e-9), lam_err[0] / max(lam[0], 1e-9))
-            item = {'name': names[k], 'resolved': bool(rel < 0.4)}
+            d = dset[0] * math.sqrt(lam[k] / max(lam[0], 1e-9))
+            # 농도가 같다는 가정이 맞으면 설정 내경의 두 배 안쪽에 들어온다
+            item = {'name': names[k], 'resolved': bool(rel < 0.4 and 0.5 * dset[k] < d < 2 * dset[k])}
             if item['resolved']:
-                d = dset[0] * math.sqrt(lam[k] / lam[0])
                 item['d_mm'] = round(float(d), 2); item['d_err_mm'] = round(float(d * rel / 2), 2)
             ratio.append(item)
 

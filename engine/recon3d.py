@@ -474,13 +474,17 @@ def prior_res(model, q, prior):
 
 def make_model(kind, geo, cfg):
     if kind == 'step':
-        return ModelStep(geo, cfg['box'], cfg.get('loop_outlet', 0), cfg.get('step_tie_speed', True), cfg.get('step_outside_after', True))
-    if kind == 'loop':
+        m = ModelStep(geo, cfg['box'], cfg.get('loop_outlet', 0), cfg.get('step_tie_speed', False), cfg.get('step_outside_after', True))
+    elif kind == 'loop':
         hm = cfg.get('hose_mm') or {}
         tie = cfg.get('tie_lambda', bool(hm) and all(abs(d - hm.get('stem', 3)) < 1e-6 for d in hm.get('branches', [3, 3])))
-        return ModelLoop(geo, cfg['box'], cfg.get('loop_outlet', 0), tie)
-    nb = 1 if kind == 'single' else len(cfg['outlets'])
-    m = Model(geo, nb, cfg['box'], cfg.get('phys'))
+        m = ModelLoop(geo, cfg['box'], cfg.get('loop_outlet', 0), tie)
+    else:
+        m = Model(geo, 1 if kind == 'single' else len(cfg['outlets']), cfg['box'], cfg.get('phys'))
+    pr = cfg.get('prior') or {}
+    if pr.get('downhill'):      # 호스는 내리막만 있다: 중간 점이 입구보다 높거나 출구보다 낮을 수 없다
+        tol = pr.get('flat_tol_cm', 0.3); ends = [o[1] for o in geo.outlets]
+        m.plo[1] = max(m.plo[1], min(ends) - tol); m.phi[1] = min(m.phi[1], geo.inlet[1] + tol)
     return m
 
 def aligner(Y, U, W, noise, dt, drift):
@@ -556,14 +560,14 @@ def fit_range(cfg, tt, data, I):
     if guess is not None and t_on > guess + 8: t_on = float(guess)
     a = max(first, t_on - 12)
     tw, dw = rebin(*T.window_data(tt, data, a, min(t_on + 12, last)), 2)
-    span = 6.0
+    span = 8.0
     for o in cfg['outlets']:
-        c = dict(cfg); c['outlets'] = [o]
+        c = dict(cfg); c['outlets'] = [o]; c['curve'] = True      # 구간은 경로 모양 설정과 상관없이 같게 정한다
         g = Geometry(c, I, BANDS_COARSE)
         front = T.FrontModel(Model(g, 1, cfg['box']), {'C': [(g.inlet + g.outlets[0]) / 2]})
         ft = T.Fitter(front, c, tw, dw, t_on)
         cost = [ft.fit(ft.start(u)[1], {1: u}, nfev=8)[1] for u in T.SPEED_GRID]
-        span = max(span, 1.2 * front.reach[0] / float(T.SPEED_GRID[int(np.argmin(cost))]) + 3)
+        span = max(span, 1.5 * front.reach[0] / float(T.SPEED_GRID[int(np.argmin(cost))]) + 6)
     return a, min(t_on + min(span, 40.0), last)
 
 def cut(tt, data, a, b):
@@ -736,7 +740,7 @@ def plan(ctx):
         r['flat'] = False
         if r['kind'] == 'step':
             p = r['model'].unpack(r['best'].x); k = math.sqrt(max(p['lam'][0], 1e-9) / max(p['lam0'], 1e-9))
-            r['flat'] = max(k, 1 / k) < cfg.get('step_min_ratio', 1.25)
+            r['flat'] = max(k, 1 / k) < cfg.get('step_min_ratio', 1.3)
     results.sort(key=lambda r: (r['rough'], r['flat'], r['bic']))
     r0 = results[0]
     # 고른 후보의 다른 답은 원래 해상도로 점수만 다시 매긴다
