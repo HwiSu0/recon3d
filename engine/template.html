@@ -134,6 +134,11 @@ const rows = [];
 rows.push(['χ²/N', `${S.chi2_per_N.toFixed(2)} <span class="meta">(철 없음 ${S.chi2_per_N_no_iron_model.toFixed(2)})</span>`]);
 if (S.fit_window) rows.push(['맞춘 구간', `${S.fit_window[0]}~${S.fit_window[1]} s`]);
 if (S.baseline) rows.push(['기준 구간', `${S.baseline[0]}~${S.baseline[1]} s`]);
+if (S.knocks && S.knocks.length) {
+  const span = S.knocks.map(([a, b]) => `${a.toFixed(1)}~${b.toFixed(1)} s`).join(', ');
+  rows.push(['충격', `${span} <span class="meta">(센서가 흔들린 구간. 값의 어긋남을 없애고 맞춤에서 뺌)</span>`]);
+  if (S.knocks.some(([a, b]) => b > S.fit_window[0] && a < S.fit_window[1])) rows.push(['주의', `<span class="bad">맞춘 구간 안에 충격이 있어 이 구간의 값은 덜 정확할 수 있음</span>`]);
+}
 if (S.topology_compare) rows.push(['구조', S.topology_compare.map((r, i) => `${i === 0 ? '<b>' : ''}${r.name}${r.flat ? ' (굵기 변화 없음)' : ''}: χ²/N ${r.rough ? '약 ' : ''}${r.chi2_per_N.toFixed(2)}, BIC ${r.bic.toFixed(0)}${i === 0 ? '</b>' : ''}`).join('<br>')]);
 if (S.topology_compare && S.chi2_per_N > 2) rows.push(['주의', `<span class="bad">χ²/N이 커서 구조 선택을 믿기 어려움</span>`]);
 (S.sensors_swapped || []).forEach(([a, b]) => rows.push(['주의', `<span class="bad">코일 자기장 크기로 보면 ${a}와 ${b}의 위치나 ID가 서로 바뀐 것 같음</span>`]));

@@ -103,7 +103,7 @@ class FrontModel:
 def onset(tt, data):
     """신호가 기준 구간 잡음을 뚜렷하게 벗어나는 첫 시각.
     앞머리는 모든 센서에 나타나므로 센서들의 중앙값을 써서 한 센서의 튀는 값에 끌려가지 않게 한다."""
-    first = R.first_motion(tt, data)
+    first = R.arrival(tt, data)
     if first is not None:
         return first
     snr = np.stack([np.where(d['w'] > 0, np.linalg.norm(d['dB'], axis=1) / d['noise'], np.nan) for d in data.values()])
@@ -138,7 +138,7 @@ class Fitter:
         self.front = front
         self.tt = tt; self.t_on = t_on
         b0a, b0b = cfg.get('baseline', [2, 12])
-        self.f, _, _ = R.residuals(front, data, tt, drift=cfg.get('drift', False), tb=(b0a + b0b) / 2)
+        self.f, _, _ = R.residuals(front, data, tt, drift=cfg.get('drift', False), tb=(b0a + b0b) / 2, knocks=cfg.get('free_knocks', ()))
         self.lo, self.hi = front.bounds()
         self.axes = 3 * len(data)
 

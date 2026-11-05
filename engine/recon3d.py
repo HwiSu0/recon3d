@@ -87,31 +87,118 @@ def bin_mean(t, v, a, dt):
     with np.errstate(invalid='ignore', divide='ignore'):
         return (C[i1] - C[i0]) / (i1 - i0)[:, None]
 
-def first_motion(tt, data, hold=2.0, sig=5.0, need=2):
-    """철 신호가 처음 나타나는 시각. 센서 두 대 이상이 처음 10초의 흔들림을 뚜렷이 벗어나 2초 넘게 유지되는 때."""
+def first_motion(tt, data, start=None, hold=2.0, sig=5.0, need=2):
+    """start 뒤로 철 신호가 처음 나타나는 시각. 센서 두 대 이상이 그 뒤 10초의 흔들림을 뚜렷이 벗어나 2초 넘게 유지되는 때."""
     dt = tt[1] - tt[0]; n = max(1, int(round(1.5 / dt))); h = max(1, int(round(hold / dt))); above = []
+    i0 = 0 if start is None else int(np.searchsorted(tt, start)); i1 = i0 + max(8, int(10 / dt))
     for d in data.values():
-        s = np.convolve(np.linalg.norm(d['dB'] * d['w'][:, None], axis=1), np.ones(n) / n, mode='same')
-        q = s[:max(8, int(10 / dt))]
+        ok = d['w'][i0:i1] > 0
+        if ok.sum() < 4: continue
+        v = (d['dB'] - d['dB'][i0:i1][ok].mean(0)) * d['w'][:, None]
+        s = np.convolve(np.linalg.norm(v, axis=1), np.ones(n) / n, mode='same')
+        q = s[i0:i1][ok]
         above.append(s > q.mean() + sig * max(q.std(), 0.02))
+    if len(above) < need: return None
     a = np.sum(above, 0) >= need
-    for i in range(len(a) - h):
+    for i in range(i0, len(a) - h):
         if a[i:i + h].all(): return float(tt[i])
     return None
 
+def quiet(tt, data, start, span=12.0, win=2.5, sig=5.0, need=2):
+    """start 뒤 span초가 잔잔한가. 처음 win초의 평균에서 센서 두 대 이상이 잡음으로 설명되지 않게 벗어나면 이미 철이 들어온 것이다."""
+    dt = tt[1] - tt[0]; i0 = int(np.searchsorted(tt, start)); h = max(3, int(win / dt)); parts = int(span / win)
+    moved = np.zeros(parts, int)
+    mean = lambda d, i: d['dB'][i:i + h][d['w'][i:i + h] > 0]
+    for d in data.values():
+        ref = mean(d, i0)
+        if len(ref) < 3: continue
+        for j in range(1, parts):
+            v = mean(d, i0 + j * h)
+            if len(v) >= 3: moved[j] += np.linalg.norm(v.mean(0) - ref.mean(0)) > sig * d['noise'] * math.sqrt(1 / len(v) + 1 / len(ref))
+    return moved.max() < need
+
+def arrival(tt, data):
+    """철이 처음 닿는 시각. 충격 때문에 값이 어긋난 것을 철로 착각하지 않게 충격 뒤 잔잔한 구간을 새 기준으로 삼아 다시 찾는다.
+    충격 뒤가 잔잔하지 않으면 충격과 철이 같이 온 것이므로 그 앞에서 찾은 시각을 쓴다."""
+    dead = np.all([d['w'] == 0 for d in data.values()], 0)
+    begin = [float(tt[i + 1]) for i in np.where(~dead[:-1] & dead[1:])[0]]
+    end = [float(tt[i + 1]) for i in np.where(dead[:-1] & ~dead[1:])[0]]
+    best = None
+    for n, s in enumerate([float(tt[0])] + [e + 0.5 for e in end]):
+        if n and not quiet(tt, data, s): break
+        on = first_motion(tt, data, s)
+        if on is None: continue
+        best = on
+        stop = [b for b in begin if b > s]
+        if not stop or on < stop[0] - 0.25: break
+    return best
+
+def vibration(B, k, m):
+    """센서가 떨리는 세기. 철 신호는 0.1초 사이에 오르내리지 못하므로 이 대역에는 잡음과 기계 진동만 남는다."""
+    hp = B[k:-k] - 0.5 * (B[:-2 * k] + B[2 * k:])
+    e = np.nan_to_num((hp ** 2).sum(1))
+    return np.r_[np.zeros(k), np.convolve(e, np.ones(m) / m, mode='same'), np.zeros(k)]
+
+def find_knocks(t, B, ratio=5.0, low=2.5, join=0.7, longest=5.0):
+    """센서가 평소 잡음의 ratio배 넘게 떨린 구간들. 고장처럼 길게 이어지는 것은 충격이 아니므로 뺀다."""
+    dt = float(np.median(np.diff(t))); k = int(round(0.08 / dt)); m = int(round(0.3 / dt)); gap = max(1, int(round(join / dt)))
+    if k < 2 or len(t) < 8 * (k + m): return []
+    R = []
+    for v in B.values():
+        e = vibration(v, k, m); R.append(e / max(float(np.median(e[e > 0])), 1e-9))
+    R = np.max(R, 0); hi = R > ratio; lo = R > low; out = []; i = 0
+    while i < len(t):
+        if hi[i]:
+            a = b = i
+            while a > 0 and lo[a - 1]: a -= 1
+            while b + 1 < len(t) and (lo[b + 1] or hi[b + 1:b + gap].any()): b += 1
+            out.append([float(t[a]), float(t[b])]); i = b
+        i += 1
+    return [s for s in out if s[1] - s[0] < longest]
+
+def drop_knocks(t, B, knocks, side=3.0, gap=0.15):
+    """충격 양쪽을 한 직선과 계단으로 맞춰 계단만큼을 뒤쪽 값에서 뺀다. 센서가 살짝 돌아가 어긋난 값이 철로 보이지 않게 한다."""
+    for a, b in knocks:
+        left = (t > a - side - gap) & (t < a - gap); right = (t > b + gap) & (t < b + side + gap); mid = 0.5 * (a + b)
+        for v in B.values():
+            use = (left | right) & ~np.isnan(v[:, 0])
+            if (use & left).sum() < 10 or (use & right).sum() < 10: continue
+            A = np.stack([np.ones(use.sum()), t[use] - mid, (t[use] > mid).astype(float)], 1)
+            step = np.linalg.lstsq(A, v[use], rcond=None)[0][2]
+            v[t > mid] -= step
+
+def steady(cfg, tab):
+    """측정 중 책상이나 센서가 부딪힌 자리를 찾아 값의 어긋남을 없애고 그 구간을 맞춤에서 뺀다."""
+    ratio = cfg.get('knock_ratio', 5.0); cfg['knocks'] = []
+    if not ratio: return
+    run = cfg['run']; t = tab[f'Time (s) Run #{run}']; n = int((~np.isnan(t)).sum()); t = t[:n]
+    name = lambda c, s: f'{c} Magnetic Field Strength, {s} (G) Run #{run}'
+    B = {k: np.stack([tab[name(c, s)][:n] for c in 'XYZ'], 1) * 100 for k, s in cfg['ids'].items()}
+    knocks = find_knocks(t, B, ratio)
+    if not knocks: return
+    drop_knocks(t, B, knocks)
+    for k, s in cfg['ids'].items():
+        for i, c in enumerate('XYZ'): tab[name(c, s)] = B[k][:, i] / 100
+    cfg['knocks'] = [[round(a, 2), round(b, 2)] for a, b in knocks]
+
 def load(cfg):
     """기준 구간이나 분석 구간이 없으면 측정값에서 찾아 cfg에 적어 둔다."""
-    tab = read_table(cfg)
+    tab = read_table(cfg); steady(cfg, tab)
     if not (cfg.get('baseline') and cfg.get('t_window')):
         t = tab[f"Time (s) Run #{cfg['run']}"]; t = t[~np.isnan(t)]
         first = float(t[0]) + 1; last = float(t[-1])
         tt, data, _ = bin_run(cfg, tab, cfg.get('baseline') or [first, min(first + 10, last)], cfg.get('t_window') or [first, last])
-        t_on = first_motion(tt, data)
+        t_on = arrival(tt, data)
         if t_on is None: t_on = first + 23
         # 철이 오기 직전의 조용한 구간이 표류가 가장 적다
         cfg.setdefault('baseline', [max(first, t_on - 15), max(first + 5, t_on - 4)])
         cfg.setdefault('t_window', [first, min(last, t_on + 45)])
-    return bin_run(cfg, tab, cfg['baseline'], cfg['t_window'])
+    out = bin_run(cfg, tab, cfg['baseline'], cfg['t_window'])
+    if cfg['knocks']:
+        # 철이 온 뒤의 충격은 철 신호와 겹쳐 앞뒤 값만으로 어긋남을 잴 수 없으므로 맞출 때 함께 푼다
+        t_on = arrival(out[0], out[1])
+        cfg['free_knocks'] = [k for k in cfg['knocks'] if t_on is not None and k[0] >= t_on]
+    return out
 
 def bin_run(cfg, tab, baseline, window):
     run = cfg['run']; ids = cfg['ids']
@@ -120,7 +207,9 @@ def bin_run(cfg, tab, baseline, window):
     I = col(f'Output Current (A) Run #{run}')
     n = min(len(t), len(I)); t = t[:n]; I = I[:n]
     b0a, b0b = baseline
-    m0 = (t > b0a) & (t < b0b); Iref = I[m0].mean()
+    m0 = (t > b0a) & (t < b0b)
+    for a, b in cfg.get('knocks', []): m0[(t >= a) & (t <= b)] = False
+    Iref = I[m0].mean()
     t0, t1 = window; dt = cfg.get('bin', 0.5)
     t0 = max(t0, float(t[0])); t1 = min(t1, float(t[-1]))      # 데이터 길이를 넘으면 자동으로 줄임
     edges = np.arange(t0, t1 + 1e-9, dt); tc = (edges[:-1] + edges[1:]) / 2
@@ -132,6 +221,7 @@ def bin_run(cfg, tab, baseline, window):
         V = bin_mean(t, dB, edges[:-1], dt)
         # 잡음: 기준 구간의 0.5초 평균값들이 (직선 추세를 뺀 뒤) 흔들리는 정도
         e0 = np.arange(b0a, b0b - dt + 1e-9, dt)
+        for a, b in cfg.get('knocks', []): e0 = e0[(e0 + dt <= a) | (e0 >= b)]
         Vb = bin_mean(t, dB, e0, dt)
         if len(Vb) >= 4:
             A = np.stack([np.ones(len(e0)), e0 - e0.mean()], 1)
@@ -140,7 +230,7 @@ def bin_run(cfg, tab, baseline, window):
         else:
             noise = float(dB[m0].std(0).mean() / math.sqrt(max(1, dt * 50 / 5)))
         w = np.ones(len(tc))
-        for ma, mb in cfg.get('mask', {}).get(k, []):      # 고장/외부 방해 구간 제외
+        for ma, mb in list(cfg.get('mask', {}).get(k, [])) + cfg.get('knocks', []):      # 고장/외부 방해 구간 제외
             w[(tc >= ma) & (tc < mb)] = 0
         w[np.isnan(V).any(1)] = 0
         bad = np.where(np.nan_to_num(np.linalg.norm(V, axis=1)) > cfg.get('glitch_uT', 30.0))[0]
@@ -522,7 +612,7 @@ def aligner(Y, U, W, noise, dt, drift):
     Pu = U[:, :, None] * U[:, None, :]
     w2 = W * W; wy = w2[:, :, None] * Y; wd = (W * dt)[:, None]; wd2 = (w2 * dt)[:, None]
     den = np.maximum(np.sum(W * dt * dt, 1), 1e-9)[:, None]; yv = (wd @ Y)[:, 0]; sc = W[:, :, None] / noise[:, None, None]
-    rowt = dt[None, :, None]
+    rowt = dt[:, :, None]
     def run(x):
         par = x @ Pu; per = x - par; cro = x @ Kt
         A = np.sum(per * wy, (1, 2)); B = np.sum(cro * wy, (1, 2))
@@ -537,17 +627,35 @@ def aligner(Y, U, W, noise, dt, drift):
         return ((par + c[:, :, None] * per + s[:, :, None] * cro + rowt * d[:, None] - Y) * sc).ravel()
     return run
 
-def residuals(model, data, tt, drift=False, tb=0.0, prior=None):
+def after_knocks(tt, knocks):
+    """충격이 끝난 뒤 다음 충격까지의 구간들."""
+    ends = sorted(b for a, b in knocks) + [np.inf]
+    return [m for m in ((tt >= b) & (tt < e) for b, e in zip(ends, ends[1:])) if m.any()]
+
+def offset_free(tt, knocks, W):
+    """충격 뒤 구간의 어긋남을 모르는 값으로 둔다. 구간마다 평균을 빼는 것이 그 값을 푼 것과 같다."""
+    parts = after_knocks(tt, knocks)
+    if not parts: return None
+    def apply(x):
+        x = x.copy()
+        for m in parts:
+            w = W[:, m, None]; x[:, m] -= (x[:, m] * w).sum(1, keepdims=True) / np.maximum(w.sum(1, keepdims=True), 1)
+        return x
+    return apply
+
+def residuals(model, data, tt, drift=False, tb=0.0, prior=None, knocks=()):
     U = {k: B0lab(model.g.sensors[k], model.g.I)[0] for k in data}
     U = {k: v / np.linalg.norm(v) for k, v in U.items()}
     RA = {k: rot_align(data[k]['b0'], U[k] * np.linalg.norm(data[k]['b0'])) for k in data}
     Y = {k: data[k]['dB'] @ RA[k].T for k in data}
     keys = list(data)
-    align = aligner(np.stack([Y[k] for k in keys]), np.stack([U[k] for k in keys]), np.stack([data[k]['w'] for k in keys]),
-                    np.array([data[k]['noise'] for k in keys]), tt - tb, drift)
+    W = np.stack([data[k]['w'] for k in keys]); Ya = np.stack([Y[k] for k in keys]); ta = np.tile(tt - tb, (len(keys), 1))
+    free = offset_free(tt, knocks, W) if len(knocks) else None
+    if free: Ya = free(Ya); ta = free(ta[:, :, None])[:, :, 0]
+    align = aligner(Ya, np.stack([U[k] for k in keys]), W, np.array([data[k]['noise'] for k in keys]), ta, drift)
     def f(q):
-        pr = model.predict(q, tt)
-        r = align(np.stack([pr[k] for k in keys]))
+        pr = model.predict(q, tt); x = np.stack([pr[k] for k in keys])
+        r = align(free(x) if free else x)
         return np.concatenate([r, prior_res(model, q, prior)]) if prior else r
     return f, Y, U
 
@@ -617,7 +725,7 @@ class Search:
                 cc = dict(c); cc['ds'] = 2 * c.get('ds', 0.25); bands = BANDS_COARSE
                 tt, data = rebin(self.tt, self.data, c.get('coarse_bin', 2))
             model = make_model(self.kind, Geometry(cc, self.I, bands), cc)
-            f, Y, U = residuals(model, data, tt, drift=c.get('drift', False), tb=(b0a + b0b) / 2, prior=c.get('prior'))
+            f, Y, U = residuals(model, data, tt, drift=c.get('drift', False), tb=(b0a + b0b) / 2, prior=c.get('prior'), knocks=c.get('free_knocks', ()))
             self.lv[name] = (model, f, Y, U)
         return self.lv[name]
     def starts(self):
@@ -906,6 +1014,8 @@ def html(cfg, model, sols, ctx, summ):
         w = data[k]['w']; wf = w * inside      # 그래프는 전체 시간을 그리고, 센서 회전과 표류는 맞춘 구간에서 정한다
         if cfg.get('drift'): x = fit_one(pr[k], Y[k], U[k], wf, True, tt - (b0a + b0b) / 2)
         else: x, _ = best_psi(pr[k], Y[k], U[k], wf)
+        for m in after_knocks(tt, cfg.get('free_knocks', ())):
+            if (m & (wf > 0)).any(): x[m] += (Y[k] - x)[m & (wf > 0)].mean(0)
         e1 = np.cross(U[k], [0, 0, 1.]); e1 /= np.linalg.norm(e1); e2 = np.cross(U[k], e1)
         comp = lambda A: [[(round(float(v @ e), 3) if wi > 0 else None) for v, wi in zip(A, w)] for e in (U[k], e1, e2)]
         traces[k] = {'meas': comp(Y[k]), 'model': comp(x), 'noise': round(float(data[k]['noise']), 3)}
@@ -963,6 +1073,7 @@ def finish(ctx, results, sols):
     summ['noise_uT'] = {k: round(float(d['noise']), 3) for k, d in data.items()}
     summ['fit_window'] = [round(float(v), 1) for v in ctx.win]
     summ['baseline'] = [round(float(v), 1) for v in cfg['baseline']]; summ['t_window'] = [round(float(v), 1) for v in cfg['t_window']]
+    summ['knocks'] = cfg.get('knocks', [])
     summ['sensors_swapped'] = swapped_sensors(data, model.g.sensors, I)
     pb = model.unpack(sols[0].x)
     summ['at_limit'] = bool(pb['U0'] > 29 or pb['tau'] < 0.12)      # 앞머리가 지나가는 신호로 보기 어려운 답
