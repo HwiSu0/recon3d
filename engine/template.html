@@ -139,12 +139,12 @@ if (S.knocks && S.knocks.length) {
   rows.push(['충격', `${span} <span class="meta">(센서가 흔들린 구간. 값의 어긋남을 없애고 맞춤에서 뺌)</span>`]);
   if (S.knocks.some(([a, b]) => b > S.fit_window[0] && a < S.fit_window[1])) rows.push(['주의', `<span class="bad">맞춘 구간 안에 충격이 있어 이 구간의 값은 덜 정확할 수 있음</span>`]);
 }
-if (S.topology_compare) rows.push(['구조', S.topology_compare.map((r, i) => `${i === 0 ? '<b>' : ''}${r.name}${r.flat ? ' (굵기 변화 없음)' : ''}: χ²/N ${r.rough ? '약 ' : ''}${r.chi2_per_N.toFixed(2)}, BIC ${r.bic.toFixed(0)}${i === 0 ? '</b>' : ''}`).join('<br>')]);
+if (S.topology_compare) rows.push(['구조', S.topology_compare.map((r, i) => `${i === 0 ? '<b>' : ''}${r.name}${r.flat ? ' (굵기 변화 없음)' : ''}${r.limit ? ' (탐색 범위 끝)' : ''}: χ²/N ${r.rough ? '약 ' : ''}${r.chi2_per_N.toFixed(2)}, 점수 ${r.score.toFixed(0)}${i === 0 ? '</b>' : ''}`).join('<br>')]);
 if (S.topology_compare && S.chi2_per_N > 2) rows.push(['주의', `<span class="bad">χ²/N이 커서 구조 선택을 믿기 어려움</span>`]);
 (S.sensors_swapped || []).forEach(([a, b]) => rows.push(['주의', `<span class="bad">코일 자기장 크기로 보면 ${a}와 ${b}의 위치나 ID가 서로 바뀐 것 같음</span>`]));
 if (S.at_limit) rows.push(['주의', `<span class="bad">속도나 앞머리 폭이 탐색 범위 끝에 걸림. 앞머리가 너무 빨라 경로 정보가 부족할 수 있음</span>`]);
-const ranked = (S.topology_compare || []).filter(r => !r.flat);
-if (ranked.length > 1 && ranked[1].bic - ranked[0].bic < 10) rows.push(['주의', `<span class="bad">앞선 두 후보의 BIC 차이가 10보다 작아 구조를 정할 수 없음</span>`]);
+const ranked = (S.topology_compare || []).filter(r => !r.flat && !r.limit);
+if (ranked.length > 1 && ranked[1].score - ranked[0].score < 10) rows.push(['주의', `<span class="bad">앞선 두 후보의 점수 차이가 10보다 작아 구조를 정할 수 없음</span>`]);
 if (S.J) rows.push([LOOP ? '분기점 J1' : '분기점', fp(S.J)]);
 if (S.J2) rows.push(['합류점 J2', fp(S.J2)]);
 if (STEP && S.P) { rows.push(['굵기 바뀌는 점 P', fp(S.P)]); rows.push(['입구→P', `${f1(S.step_s_cm)} cm`]); }

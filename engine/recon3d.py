@@ -129,8 +129,7 @@ def arrival(tt, data):
         on = first_motion(tt, data, s)
         if on is None: continue
         best = on
-        stop = [b for b in begin if b > s]
-        if not stop or on < stop[0] - 0.25: break
+        if not any(a - 0.25 <= on <= b + 3 for a, b in zip(begin, end)): break
     return best
 
 def vibration(B, k, m):
@@ -454,13 +453,21 @@ class ModelLoop:
         hi = abc2lab([bounds_abc['a'][1], bounds_abc['b'][1], bounds_abc['c'][1]])
         self.plo = np.minimum(lo, hi); self.phi = np.maximum(lo, hi)
     def unpack(self, q):
+        if self.tie == 'flow':
+            # 모든 관이 같은 호스면 양쪽 압력 차가 같아 속도가 길이에 반비례하고, 두 갈래 속도의 합이 합류 전후 속도다
+            J, J2, C1, C2 = q[0:3], q[3:6], q[6:9], q[9:12]
+            L1 = self.g.piece([J, C1, J2])[2]; L2 = self.g.piece([J, C2, J2])[2]; L = max(L1 + L2, 1e-6)
+            return {'J': J, 'J2': J2, 'C': [C1, C2], 't0': q[12], 'U0': q[13], 'U': [q[13] * L2 / L, q[13] * L1 / L],
+                    'lam0': q[14], 'lam': [q[14], q[14]], 'tau': q[15]}
         if self.tie:   # 두 갈래 굵기·농도가 같음: 철 양 하나
             return {'J': q[0:3], 'J2': q[3:6], 'C': [q[6:9], q[9:12]], 't0': q[12], 'U0': q[13], 'U': [q[14], q[15]],
                     'lam0': q[16], 'lam': [q[16], q[16]], 'tau': q[17]}
         return {'J': q[0:3], 'J2': q[3:6], 'C': [q[6:9], q[9:12]], 't0': q[12], 'U0': q[13], 'U': [q[14], q[15]],
                 'lam0': q[16], 'lam': [q[17], q[18]], 'tau': q[19]}
     def bounds(self):
-        if self.tie:
+        if self.tie == 'flow':
+            lo = list(self.plo) * 4 + [-60, 0.3, 0.0, 0.1]; hi = list(self.phi) * 4 + [200, 30, 3.0, 20]
+        elif self.tie:
             lo = list(self.plo) * 4 + [-60, 0.3, 0.1, 0.1, 0.0, 0.1]; hi = list(self.phi) * 4 + [200, 30, 30, 30, 3.0, 20]
         else:
             lo = list(self.plo) * 4 + [-60, 0.3, 0.1, 0.1, 0.0, 0.0, 0.0, 0.1]
@@ -491,6 +498,7 @@ class ModelLoop:
         if tg is None: tg = cfg.get('t_front_guess', float(tt[0]) + 5)
         tg = tg + rng.uniform(-3, 4)
         Ug = float(np.exp(rng.uniform(np.log(0.7), np.log(7.0)))) if cfg.get('U_guess') is None else cfg['U_guess'] * rng.uniform(0.5, 2.0)
+        if self.tie == 'flow': return [tg, Ug, 0.1, 2.0]
         return [tg, Ug, Ug * 0.6, Ug * 0.6, 0.1, 2.0] if self.tie else [tg, Ug, Ug * 0.6, Ug * 0.6, 0.1, 0.1, 0.1, 2.0]
     def predict(self, q, tt):
         p = self.unpack(q); g = self.g; P = self.paths(p); tau = p['tau']; t0 = p['t0']; U0 = p['U0']; l0 = p['lam0']
@@ -595,8 +603,8 @@ def make_model(kind, geo, cfg):
         m = ModelStep(geo, cfg['box'], cfg.get('loop_outlet', 0), cfg.get('step_tie_speed', False), cfg.get('step_outside_after', True))
     elif kind == 'loop':
         hm = cfg.get('hose_mm') or {}
-        tie = cfg.get('tie_lambda', bool(hm) and all(abs(d - hm.get('stem', 3)) < 1e-6 for d in hm.get('branches', [3, 3])))
-        m = ModelLoop(geo, cfg['box'], cfg.get('loop_outlet', 0), tie)
+        same = all(abs(d - hm.get('stem', 3)) < 1e-6 for d in hm.get('branches', []))      # 호스를 모르면 같은 호스로 본다
+        m = ModelLoop(geo, cfg['box'], cfg.get('loop_outlet', 0), cfg.get('loop_tie', cfg.get('tie_lambda', 'flow' if same else False)))
     else:
         m = Model(geo, 1 if kind == 'single' else len(cfg['outlets']), cfg['box'], cfg.get('phys'))
     pr = cfg.get('prior') or {}
@@ -784,10 +792,23 @@ def correlation(r, ns, nt):
     d = float(a @ a); rho = min(max(float(a @ b) / d if d > 0 else 0.0, 0.0), 0.8)
     return (1 + rho) / (1 - rho)
 
+def evidence_penalty(search, x, scale):
+    """매개변수를 맞춘 값. 탐색 범위를 1로 놓고 측정이 정한 방향마다 범위가 좁아진 만큼 더한다 (라플라스 근사).
+    측정이 정하지 못하는 매개변수는 값을 더하지 않으므로, 매개변수 수를 그대로 세는 BIC보다 복잡한 구조에 공정하다."""
+    model, f = search.level('fine')[:2]; lo, hi = model.bounds()
+    x = np.clip(np.array(x, float), lo, hi); wide = hi - lo; J = []
+    for i in range(len(x)):
+        a = x.copy(); b = x.copy(); h = 2e-3 * wide[i]
+        a[i] = max(lo[i], x[i] - h); b[i] = min(hi[i], x[i] + h)
+        J.append((f(b) - f(a)) / ((b[i] - a[i]) / wide[i]))
+    J = np.array(J).T
+    return float(np.sum(np.log(np.maximum(np.linalg.eigvalsh(J.T @ J / scale) / (2 * np.pi), 1.0))))
+
 def do_job(ctx, job):
     """계산 한 조각. 입력과 출력이 숫자뿐이라 다른 워커에 맡길 수 있고, 맡긴 순서와 상관없이 답이 같다."""
     s = ctx.search(job['c']); cfg = s.cfg; st = job['stage']
     try:
+        if st == 'evidence': return {'penalty': evidence_penalty(s, job['x'], job['scale'])}
         if st == 'score':
             r = s.level('fine')[1](np.array(job['x'], float))
             return {'x': job['x'], 'cost': 0.5 * float(r @ r)}
@@ -833,11 +854,7 @@ def worth_trying(ctx, rich, done):
     """단순한 구조의 결과로 복잡한 구조를 맞출 필요가 있는지 정한다."""
     fits = {c: r[0]['cost'] * 2 for c, r in done.items() if r}
     if not fits: return rich
-    N = 3 * len(ctx.dw) * len(ctx.tw); low = min(fits.values())
-    low_k = len(ctx.search(min(fits, key=fits.get)).starts()[0])
-    keep = []
-    # 복잡한 구조가 잡음까지 완벽하게 맞춰도 BIC가 더 나빠지면 맞춰 볼 필요가 없다
-    if low - N < min(len(ctx.search(c).starts()[0]) - low_k for c in rich) * math.log(N): return []
+    low = min(fits.values()); keep = []
     # 합류 관은 한 줄 관이 잘 맞은 출구만 시험한다
     by_exit = {}
     for c, v in fits.items():
@@ -858,9 +875,7 @@ def plan(ctx):
     if simple:
         b, d, r = yield from climb(ctx, simple, 1, parts)
         best.update(b); done.update(d); rough |= r
-    if simple and rich:
-        rich = worth_trying(ctx, rich, done)
-        if not rich: print('단순한 구조가 잡음 수준까지 맞아 복잡한 구조는 맞추지 않음', flush=True)
+    if simple and rich: rich = worth_trying(ctx, rich, done)
     if rich:
         b, d, r = yield from climb(ctx, rich, parts, parts)
         best.update(b); done.update(d); rough |= r
@@ -872,20 +887,25 @@ def plan(ctx):
         results.append({**d, 'c': c, 'search': s, 'model': model, 'Y': Y, 'U': U, 'f': f, 'best': Sol(x, 0.5 * chi2, r0), 'rough': c in rough,
                         'chi2_per_N': chi2 / Nk, 'chi2': chi2, 'N': Nk, 'npar': npar})
     if not results: sys.exit('[오류] 어떤 시작점에서도 맞춤이 끝나지 않았어요.')
-    # BIC는 잔차가 서로 독립인 잡음이라고 본다. 실측처럼 그렇지 않으면 chi2 차이를 그만큼 줄이고 독립인 자료 수를 쓴다
+    # 잔차는 서로 독립인 잡음이 아니다. 시간에 따라 닮은 만큼 chi2 차이를 줄여서 본다
     flex = min(results, key=lambda r: r['chi2'])
     corr = correlation(flex['best'].fun, len(ctx.dw), len(ctx.tw))
     scale = corr * max(1.0, flex['chi2'] / flex['N'])
-    for r in results:
-        r['bic'] = r['chi2'] / scale + r['npar'] * np.log(r['N'] / corr); r['scale'] = scale
-        print(f"   {r['label']}: chi2/N = {r['chi2_per_N']:.3f}, BIC = {r['bic']:.0f}", flush=True)
+    got = yield [{'stage': 'evidence', 'c': r['c'], 'x': [float(v) for v in r['best'].x], 'scale': scale} for r in results]
+    for r, e in zip(results, got):
+        r['scale'] = scale
+        r['score'] = r['chi2'] / scale + (e['penalty'] if e else r['npar'] * np.log(r['N'] / corr))
+        print(f"   {r['label']}: chi2/N = {r['chi2_per_N']:.3f}, 점수 = {r['score']:.0f}", flush=True)
     # 호스는 3 mm와 5 mm뿐이므로 굵기 비가 1에 가까운 답은 굵기 변화가 아니라 곧은 호스의 다른 표현이다
     for r in results:
         r['flat'] = False
         if r['kind'] == 'step':
             p = r['model'].unpack(r['best'].x); k = math.sqrt(max(p['lam'][0], 1e-9) / max(p['lam0'], 1e-9))
             r['flat'] = max(k, 1 / k) < cfg.get('step_min_ratio', 1.3)
-    results.sort(key=lambda r: (r['rough'], r['flat'], r['bic']))
+    # 상자 안 속도나 앞머리 폭이 탐색 범위 끝에 걸린 답은 앞머리가 그 관을 지나가는 모습을 맞춘 것이 아니다
+    for r in results:
+        p = r['model'].unpack(r['best'].x); r['limit'] = bool(max(p['U']) > 29 or p['tau'] < 0.12)
+    results.sort(key=lambda r: (r['rough'], r['flat'], r['limit'], r['score']))
     r0 = results[0]
     # 고른 후보의 다른 답은 원래 해상도로 점수만 다시 매긴다
     jobs = [{'stage': 'score', 'c': r0['c'], 'x': r['x']} for r in done[r0['c']][1:] + best[r0['c']][top:]]
@@ -1081,7 +1101,7 @@ def finish(ctx, results, sols):
     if len(results) > 1:
         summ['topology_scale'] = round(float(results[0]['scale']), 2)
         summ['topology_compare'] = [{'kind': r['kind'], 'name': r['label'], 'chi2_per_N': round(float(r['chi2_per_N']), 3),
-                                     'bic': round(float(r['bic']), 1), 'npar': r['npar'], 'rough': r['rough'], 'flat': r['flat']} for r in results]
+                                     'score': round(float(r['score']), 1), 'npar': r['npar'], 'rough': r['rough'], 'flat': r['flat'], 'limit': r['limit']} for r in results]
     summ['exit_used'] = used_cfg['outlet_names']
     if cfg.get('truth_points'):          # 실제 경로의 일부 점만 알 때 (예: 분기점, 합류점)
         tp = cfg['truth_points']; tpe = {}
