@@ -470,12 +470,16 @@ function handle(w, msg) {
 
 /* recon3d.py의 진행 출력에서 단계를 읽는다 */
 function track(line) {
-  if (/^1단계/.test(line)) pool.stage = { from: 0.08, to: 0.6, text: '경로 찾기' };
-  else if (/^2단계/.test(line)) pool.stage = { from: 0.6, to: 0.8, text: '좋은 답 다듬기' };
-  else if (/^3단계/.test(line)) pool.stage = { from: 0.8, to: 0.92, text: '마무리' };
-  else if (/굵기 추정 중/.test(line)) { pool.stage = null; setStage(0.94, '내경 추정'); return; }
-  else return;
-  setStage(pool.stage.from, pool.stage.text);
+  const m = line.match(/^(\d)단계 \((\d)\/(\d)\)/);
+  if (m) {
+    const [from, to, text] = [[0, 0.6, '경로 찾기'], [0.6, 0.8, '좋은 답 다듬기'], [0.8, 1, '마무리']][m[1] - 1];
+    const place = v => 0.08 + 0.84 * (m[2] - 1 + v) / m[3];
+    pool.stage = { from: place(from), to: place(to), text };
+    setStage(pool.stage.from, text);
+  } else if (/굵기 추정 중/.test(line)) {
+    pool.stage = null;
+    setStage(0.94, '내경 추정');
+  }
 }
 
 function explain(message) {
