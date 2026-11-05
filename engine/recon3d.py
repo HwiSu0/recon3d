@@ -756,6 +756,7 @@ class Context:
     def __init__(self, cfg):
         self.cfg = cfg
         self.tt, self.data, self.I = load(cfg)
+        if cfg.get('b0_fix'): fix_sensors_by_b0(cfg, self.data, self.I)
         self.win = fit_range(cfg, self.tt, self.data, self.I)
         self.tw, self.dw = cut(self.tt, self.data, *self.win)
         nb = len(cfg['outlets'])
@@ -768,13 +769,14 @@ class Context:
         if topo == 'auto' and exit_sel == 'auto' and used:
             if len(used) == 1: exit_sel = used[0]; cfg['try_y'] = False
             else: topo = 'y'
-        one = cfg.get('candidates', ['single', 'step', 'loop']) if topo == 'auto' else ([topo] if topo != 'y' else [])
+        if topo == 'grow': one = ['single']; cfg['try_y'] = False      # 구조 키우기: 한 줄 관에서 출발해 부품을 더해 간다
+        else: one = cfg.get('candidates', ['single', 'step', 'loop']) if topo == 'auto' else ([topo] if topo != 'y' else [])
         hm = cfg.get('hose_mm') or {}
         if topo == 'auto' and hm.get('branches') and all(abs(d - hm.get('stem', 3)) < 1e-6 for d in hm['branches']):
             one = [k for k in one if k != 'step']      # 호스 굵기가 모두 같으면 굵기 변화 관은 후보가 아니다
         exits = list(range(nb)) if exit_sel == 'auto' else [int(exit_sel)]
         cands = [(k, [i]) for i in exits for k in one]
-        if topo == 'y' or (topo == 'auto' and nb >= 2 and cfg.get('try_y', True)): cands.append(('y', list(range(nb))))
+        if topo == 'y' or (topo in ('auto', 'grow') and nb >= 2 and cfg.get('try_y', topo == 'auto')): cands.append(('y', list(range(nb))))
         self.all_names = names; self.cands = []
         for kind, idx in cands:
             c = dict(cfg); c['outlets'] = [cfg['outlets'][i] for i in idx]; c['outlet_names'] = [names[i] for i in idx]
@@ -806,6 +808,9 @@ def evidence_penalty(search, x, scale):
 
 def do_job(ctx, job):
     """계산 한 조각. 입력과 출력이 숫자뿐이라 다른 워커에 맡길 수 있고, 맡긴 순서와 상관없이 답이 같다."""
+    if job.get('stage') in ('grow', 'grow_evidence'):
+        import grow as GR
+        return GR.grow_job(ctx, job) if job['stage'] == 'grow' else GR.grow_evidence(ctx, job)
     s = ctx.search(job['c']); cfg = s.cfg; st = job['stage']
     try:
         if st == 'evidence': return {'penalty': evidence_penalty(s, job['x'], job['scale'])}
@@ -887,11 +892,21 @@ def plan(ctx):
         results.append({**d, 'c': c, 'search': s, 'model': model, 'Y': Y, 'U': U, 'f': f, 'best': Sol(x, 0.5 * chi2, r0), 'rough': c in rough,
                         'chi2_per_N': chi2 / Nk, 'chi2': chi2, 'N': Nk, 'npar': npar})
     if not results: sys.exit('[오류] 어떤 시작점에서도 맞춤이 끝나지 않았어요.')
+    # 구조 키우기: 정해 둔 후보 말고도, 한 줄 관에서 부품을 하나씩 더해 가며 더 맞는 구조가 있는지 찾는다
+    if cfg.get('topology') == 'grow' or (cfg.get('grow', False) and cfg.get('topology', 'auto') == 'auto'):
+        import grow as GR
+        grown = yield from GR.grow_plan(ctx, results)
+        for g in grown:
+            # 키운 구조가 후보 구조 하나와 같으면(굵기 변화 하나, 갈라졌다 모임 하나) 그 후보를 여러 시작점에서 맞춘 답을 쓴다
+            same = [r for r in results if r['kind'] == g['same_as'] and r['idx'] == g['idx']] if g.get('same_as') else []
+            if same: g['dup'] = True
+        results += grown
     # 잔차는 서로 독립인 잡음이 아니다. 시간에 따라 닮은 만큼 chi2 차이를 줄여서 본다
     flex = min(results, key=lambda r: r['chi2'])
     corr = correlation(flex['best'].fun, len(ctx.dw), len(ctx.tw))
     scale = corr * max(1.0, flex['chi2'] / flex['N'])
-    got = yield [{'stage': 'evidence', 'c': r['c'], 'x': [float(v) for v in r['best'].x], 'scale': scale} for r in results]
+    got = yield [{'stage': 'evidence', 'c': r['c'], 'x': [float(v) for v in r['best'].x], 'scale': scale} if r['kind'] != 'graph' else
+                 {'stage': 'grow_evidence', 'exit': r['idx'][0], 'st': r['st_json'], 'scale': scale} for r in results]
     for r, e in zip(results, got):
         r['scale'] = scale
         r['score'] = r['chi2'] / scale + (e['penalty'] if e else r['npar'] * np.log(r['N'] / corr))
@@ -904,12 +919,14 @@ def plan(ctx):
             r['flat'] = max(k, 1 / k) < cfg.get('step_min_ratio', 1.3)
     # 상자 안 속도나 앞머리 폭이 탐색 범위 끝에 걸린 답은 앞머리가 그 관을 지나가는 모습을 맞춘 것이 아니다
     for r in results:
-        p = r['model'].unpack(r['best'].x); r['limit'] = bool(max(p['U']) > 29 or p['tau'] < 0.12)
-    results.sort(key=lambda r: (r['rough'], r['flat'], r['limit'], r['score']))
+        p = r['model'].unpack(r['best'].x)
+        Us = p['U'] if r['kind'] != 'graph' else [u for v in r['model'].speeds(p) for u in (v if isinstance(v, list) else [v])]
+        r['limit'] = bool(max(Us) > 29 or p['tau'] < 0.12)
+    results.sort(key=lambda r: (r.get('dup', False), r['rough'], r['flat'], r['limit'], r['score']))
     r0 = results[0]
     # 고른 후보의 다른 답은 원래 해상도로 점수만 다시 매긴다
-    jobs = [{'stage': 'score', 'c': r0['c'], 'x': r['x']} for r in done[r0['c']][1:] + best[r0['c']][top:]]
-    got = yield jobs
+    jobs = [] if r0['kind'] == 'graph' else [{'stage': 'score', 'c': r0['c'], 'x': r['x']} for r in done[r0['c']][1:] + best[r0['c']][top:]]
+    got = (yield jobs) if jobs else []
     rest = [Sol(np.array(r['x']), r['cost'], r0['best'].fun) for r in got if r]
     rest.sort(key=lambda s: s.cost)
     finish(ctx, results, [r0['best']] + rest)
@@ -1046,11 +1063,14 @@ def html(cfg, model, sols, ctx, summ):
                'outlet_names': cfg.get('outlet_names', [f'출구{i+1}' for i in range(len(cfg['outlets']))]),
                'geom': geom_payload(cfg, model.nb), 'topology': model.kind,
                'all_outlets': cfg.get('_all_outlets', cfg['outlets']), 'all_outlet_names': cfg.get('_all_names'),
-               'loop_outlet': getattr(model, 'oi', None)}
+               'loop_outlet': getattr(model, 'oi', None), 'truth_points': cfg.get('truth_points'), 'curve': cfg.get('curve', True)}
+    if model.kind == 'graph':
+        import grow as GR
+        payload['pieces'] = GR.pieces_payload(model, p, (cfg.get('hose_mm') or {}).get('stem', 3)); payload['features'] = summ.get('features', [])
     tpl = open(__file__.replace('recon3d.py', 'template.html'), encoding='utf-8').read()
     return tpl.replace('__DATA__', json.dumps(payload, ensure_ascii=False))
 
-KIND_NAME = {'single': '한 줄 관', 'y': 'Y자 (갈래마다 다른 출구)', 'loop': '갈라졌다 다시 모이는 관', 'step': '중간에 굵기가 바뀌는 한 줄 관'}
+KIND_NAME = {'single': '한 줄 관', 'y': 'Y자 (갈래마다 다른 출구)', 'loop': '갈라졌다 다시 모이는 관', 'step': '중간에 굵기가 바뀌는 한 줄 관', 'graph': '구조 키우기'}
 
 def main():
     if len(sys.argv) < 2:
@@ -1082,6 +1102,77 @@ def swapped_sensors(data, sensors, I):
             if now > 0.15 and cross < now - 0.1: out.append([a, b])
     return out
 
+def sensor_check(data, sensors, I):
+    """철이 없을 때 잰 코일 자기장 크기와 계산값의 비. 센서끼리 비가 다르면 그 센서의 위치(주로 a)가 틀렸을 수 있다.
+    코일 자기장 크기는 거의 a 방향으로만 변하므로, 비를 맞추려면 a를 얼마나 옮겨야 하는지도 낸다."""
+    ratio = {}; model = {}; meas = {}
+    for k in data:
+        meas[k] = float(np.linalg.norm(data[k]['b0'])); model[k] = float(np.linalg.norm(B0lab(sensors[k], I)[0])); ratio[k] = meas[k] / model[k]
+    med = float(np.median(list(ratio.values()))); out = []
+    for k in data:
+        S = np.asarray(sensors[k], float); e = np.array([0.1, 0, 0])
+        ga = (np.linalg.norm(B0lab(S + e, I)[0]) - np.linalg.norm(B0lab(S - e, I)[0])) / 0.2
+        dev = ratio[k] / med - 1; da = (meas[k] / med - model[k]) / ga if abs(ga) > 5 else None
+        out.append({'k': k, 'meas_uT': round(meas[k], 1), 'model_uT': round(model[k], 1), 'ratio': round(ratio[k], 3), 'dev_pct': round(100 * dev, 1),
+                    'da_cm': None if da is None else round(float(da), 2), 'warn': bool(abs(dev) > 0.03)})
+    return out
+
+def fix_sensors_by_b0(cfg, data, I):
+    """(시험) 철 없을 때 잰 코일 자기장 크기가 계산값과 맞도록 센서의 a 좌표를 옮긴다. 기준 비는 b0_fix.ref (없으면 센서들의 중앙값)."""
+    opt = cfg['b0_fix'] if isinstance(cfg['b0_fix'], dict) else {}
+    chk = sensor_check(data, {k: abc2lab(v) for k, v in cfg['sensors'].items()}, I)
+    ref = opt.get('ref'); lim = opt.get('max_cm', 1.5); moved = {}
+    for c in chk:
+        k = c['k']; S = abc2lab(cfg['sensors'][k]); e = np.array([0.1, 0, 0])
+        ga = (np.linalg.norm(B0lab(S + e, I)[0]) - np.linalg.norm(B0lab(S - e, I)[0])) / 0.2
+        r = ref or float(np.median([x['ratio'] for x in chk]))
+        if abs(ga) < 5: continue
+        da = float(np.clip((c['meas_uT'] / r - c['model_uT']) / ga, -lim, lim))
+        cfg['sensors'][k] = [cfg['sensors'][k][0] + da] + list(cfg['sensors'][k][1:]); moved[k] = round(da, 2)
+    cfg['b0_fix_moved'] = moved
+    print('  코일 자기장 크기로 센서 a 좌표 보정 (cm):', moved, flush=True)
+
+def named_points(model, q):
+    """불확실 범위를 낼 점들 (실험실 좌표)"""
+    if model.kind == 'graph':
+        import grow as GR
+        st = model.unpack(q); idx = GR.point_index(st); out = {}; n = {'갈라짐': 0, '합쳐짐': 0, '굵기 변화': 0, '곡선': 0}
+        for f in GR.features(model, st):
+            if f['key'] is None: continue
+            typ = '곡선' if f['type'].startswith('곡선') else f['type']; n[typ] += 1
+            name = {'갈라짐': 'J', '합쳐짐': 'J2', '굵기 변화': 'P', '곡선': 'C'}[typ] + ('' if typ != '곡선' and n[typ] == 1 else str(n[typ]))
+            i = idx[f['key']]; out[name] = np.array(q[i:i + 3], float)
+        return out
+    p = model.unpack(q); out = {}
+    if 'J' in p: out['J'] = np.asarray(p['J'], float)
+    if 'J2' in p: out['J2'] = np.asarray(p['J2'], float)
+    if model.kind == 'step': out['P'] = np.asarray(model.point_at(p)[0], float)
+    for k, c in enumerate(p['C']): out[f'C{k + 1}'] = np.asarray(c, float)
+    return out
+
+def point_uncertainty(model, f, x, scale):
+    """잡음만 따졌을 때 점마다 흔들리는 범위 (1σ). 공분산 = (J^T J)^-1 x 보정 배율(잔차 크기와 이웃 상관). 범위 끝에 붙은 값은 고정으로 본다."""
+    x = np.asarray(x, float); lo, hi = model.bounds() if hasattr(model, 'bounds') else model.pack(model.unpack(x))[1:]
+    r0 = f(x); n = len(x); Jm = np.zeros((len(r0), n)); free = (x - lo > 1e-4 * (hi - lo)) & (hi - x > 1e-4 * (hi - lo))
+    for i in range(n):
+        if not free[i]: continue
+        h = 1e-3 * max(1.0, abs(x[i])); xi = x.copy(); xi[i] = min(x[i] + h, hi[i]); hh = xi[i] - x[i]
+        if hh <= 0: xi[i] = x[i] - h; hh = -h
+        Jm[:, i] = (f(xi) - r0) / hh
+    C = np.zeros((n, n)); Jf = Jm[:, free]; C[np.ix_(free, free)] = np.linalg.pinv(Jf.T @ Jf) * scale
+    base = named_points(model, x); out = {}
+    D = {k: np.zeros((3, n)) for k in base}
+    for i in range(n):
+        if not free[i]: continue
+        h = 1e-4 * max(1.0, abs(x[i])); xi = x.copy(); xi[i] += h; pi = named_points(model, xi)
+        for k in base: D[k][:, i] = (pi[k] - base[k]) / h
+    for k, P in base.items():
+        Cp = (D[k] @ C @ D[k].T)[np.ix_([0, 2, 1], [0, 2, 1])] + np.eye(3) * 0.1 ** 2      # (a, b, c), 최소 0.1 cm
+        w, V = np.linalg.eigh(Cp); w = np.clip(w, 0, None)
+        ell = [[float(V[0, j] * np.sqrt(w[j])), float(V[2, j] * np.sqrt(w[j])), float(-V[1, j] * np.sqrt(w[j]))] for j in range(3)]     # 화면 좌표 (a, c, -b)
+        out[k] = {'p': lab2abc(P), 'sd': [float(np.sqrt(Cp[j, j])) for j in range(3)], 'cov': Cp.tolist(), 'ell': ell}
+    return out
+
 def finish(ctx, results, sols):
     """고른 답으로 표, 내경, 결과 파일을 만든다."""
     cfg = ctx.cfg; tt = ctx.tw; data = ctx.dw; I = ctx.I
@@ -1089,7 +1180,11 @@ def finish(ctx, results, sols):
     used_cfg = r0['cfg']; used_cfg['_all_outlets'] = cfg['outlets']; used_cfg['_all_names'] = ctx.all_names
     N = len(sols[0].fun)
     z = float(np.sum(np.concatenate([(Y[k] * data[k]['w'][:, None] / data[k]['noise']).ravel() for k in Y]) ** 2) / N)
-    summ = summarize(model, sols[0], N); summ['chi2_per_N_no_iron_model'] = z
+    if model.kind == 'graph':
+        import grow as GR
+        summ = GR.summarize_graph(model, sols[0].x, N, 2 * sols[0].cost); summ['grow_history'] = r0.get('grow_history', [])
+    else: summ = summarize(model, sols[0], N)
+    summ['chi2_per_N_no_iron_model'] = z
     summ['noise_uT'] = {k: round(float(d['noise']), 3) for k, d in data.items()}
     summ['fit_window'] = [round(float(v), 1) for v in ctx.win]
     summ['baseline'] = [round(float(v), 1) for v in cfg['baseline']]; summ['t_window'] = [round(float(v), 1) for v in cfg['t_window']]
@@ -1097,25 +1192,35 @@ def finish(ctx, results, sols):
     summ['sensors_swapped'] = swapped_sensors(data, model.g.sensors, I)
     pb = model.unpack(sols[0].x)
     summ['at_limit'] = bool(pb['U0'] > 29 or pb['tau'] < 0.12)      # 앞머리가 지나가는 신호로 보기 어려운 답
-    summ['alternatives'] = [summarize(model, s, N) for s in sols[1:4]]
+    summ['alternatives'] = [summarize(model, s, N) for s in sols[1:4]] if model.kind != 'graph' else []
+    summ['sensor_check'] = sensor_check(data, model.g.sensors, I)
+    try: summ['uncertainty'] = point_uncertainty(model, f, sols[0].x, r0.get('scale', 1.0))
+    except Exception as e: print('  불확실 범위 계산 실패:', e, flush=True); summ['uncertainty'] = {}
     if len(results) > 1:
         summ['topology_scale'] = round(float(results[0]['scale']), 2)
         summ['topology_compare'] = [{'kind': r['kind'], 'name': r['label'], 'chi2_per_N': round(float(r['chi2_per_N']), 3),
-                                     'score': round(float(r['score']), 1), 'npar': r['npar'], 'rough': r['rough'], 'flat': r['flat'], 'limit': r['limit']} for r in results]
+                                     'score': round(float(r['score']), 1), 'npar': r['npar'], 'rough': r['rough'], 'flat': r['flat'], 'limit': r['limit'],
+                                     'dup': r.get('dup', False)} for r in results]
     summ['exit_used'] = used_cfg['outlet_names']
     if cfg.get('truth_points'):          # 실제 경로의 일부 점만 알 때 (예: 분기점, 합류점)
         tp = cfg['truth_points']; tpe = {}
         for key, val in tp.items():
             if key in summ: tpe[key] = round(float(np.linalg.norm(np.array(summ[key]) - np.array(val))), 2)
-        summ['truth_point_error_cm'] = tpe
+        summ['truth_point_error_cm'] = tpe; tps = {}
+        for key, val in tp.items():      # 실제 점이 '잡음만 따진 흔들림 범위'의 몇 배 밖에 있는지
+            u = summ['uncertainty'].get(key)
+            if u: d = np.array(val) - np.array(u['p']); tps[key] = round(float(np.sqrt(max(d @ np.linalg.pinv(np.array(u['cov'])) @ d, 0))), 1)
+        if tps: summ['truth_point_sigma'] = tps
     if cfg.get('truth'):
         summ['truth_error_cm'] = path_error(model, sols[0], cfg['truth'])
-        st = fit_truth(model, f, sols[0], cfg['truth'])
+        st = fit_truth(model, f, sols[0], cfg['truth']) if model.kind != 'graph' else None
         if st is not None:
             with as_written(model.g):
                 summ['truth_fit'] = summarize(model, st, N)
             summ['chi2_per_N_truth_path'] = summ['truth_fit']['chi2_per_N']
-    if cfg.get('thickness', True):      # 호스 내경 추정 (실패해도 복원 결과는 그대로 저장)
+    if model.kind == 'graph':
+        summ['thickness'] = {'error': '구조 키우기 결과는 굵기를 구간별 철 양 비(굵기 비)로만 보여 줌'}
+    elif cfg.get('thickness', True):      # 호스 내경 추정 (실패해도 복원 결과는 그대로 저장)
         print('호스 굵기 추정 중...', flush=True)
         try:
             import thickness
