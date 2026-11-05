@@ -1,0 +1,116 @@
+{
+  "title": "Run #55부터 3D 복원 (S1, S3 센서 교체)",
+  "csv": "../fine_r55.csv",
+  "run": 55,
+  "t_window": [
+    3,
+    108
+  ],
+  "baseline": [
+    3,
+    18
+  ],
+  "mask": {},
+  "sensors": {
+    "S1": [
+      2,
+      5,
+      20
+    ],
+    "S2": [
+      5.5,
+      5,
+      20
+    ],
+    "S3": [
+      6.5,
+      0,
+      14.5
+    ],
+    "S4": [
+      8,
+      5,
+      14.5
+    ]
+  },
+  "inlet": [
+    0,
+    5,
+    18.5
+  ],
+  "outlets": [
+    [
+      8,
+      2.5,
+      13
+    ],
+    [
+      8,
+      7.5,
+      13
+    ]
+  ],
+  "outlet_names": [
+    "출구1 (앞쪽)",
+    "출구2 (뒤쪽)"
+  ],
+  "box": {
+    "a": [
+      0,
+      8
+    ],
+    "b": [
+      0.5,
+      9.5
+    ],
+    "c": [
+      10.5,
+      19.5
+    ]
+  },
+  "upstream_len": 110,
+  "outlet_len": 30,
+  "drift": true,
+  "seed": 1,
+  "bin": 0.5,
+  "ds": 0.25,
+  "ids": {
+    "S1": "235-993",
+    "S2": "022-787",
+    "S3": "602-403",
+    "S4": "971-239"
+  },
+  "out": "결과/recon_run55",
+  "box_outer": {
+    "a": [
+      0,
+      8
+    ],
+    "b": [
+      0,
+      10
+    ],
+    "c": [
+      10,
+      20
+    ]
+  },
+  "hose_mm": {
+    "stem": 3,
+    "branches": [
+      5
+    ]
+  },
+  "topology": "auto",
+  "prior": {
+    "straight_sigma_cm": 1.5,
+    "downhill": true
+  },
+  "candidates": [
+    "single",
+    "step",
+    "loop"
+  ],
+  "exit": "auto",
+  "try_y": false
+}

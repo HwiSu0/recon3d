@@ -305,7 +305,20 @@ function wireFields() {
   });
 }
 
+/* Run #55부터 S1과 S3 센서를 서로 바꿔 놓았다. Run 번호에 맞게 ID를 바로잡는다 */
+const SWAP_RUN = 55;
+function matchSensors(cfg) {
+  const ids = cfg.ids;
+  if (!ids) return false;
+  const before = ids.S1 === '602-403' && ids.S3 === '235-993';
+  const after = ids.S1 === '235-993' && ids.S3 === '602-403';
+  if (!(cfg.run >= SWAP_RUN ? before : after)) return false;
+  [ids.S1, ids.S3] = [ids.S3, ids.S1];
+  return true;
+}
+
 function sync() {
+  if (matchSensors(state.cfg)) fillForm();
   const box = $('cfgText');
   if (document.activeElement !== box) box.value = JSON.stringify(state.cfg, null, 2);
   validate();
