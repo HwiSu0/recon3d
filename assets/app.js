@@ -380,6 +380,7 @@ function checkConfig() {
   c.outlets.forEach((p, k) => { if (!coord(p)) out.push(`출구 ${k + 1} 좌표 입력`); });
   if ((c.hose_mm && !(c.hose_mm.stem > 0)) || $('fBranches').dataset.bad) out.push('호스 내경 형식: 5 또는 3, 3');
   if ((c.flow_mL_s || []).some(q => q !== null && !(q > 0))) out.push('유량은 0보다 커야 함');
+  if ((c.flow_mL_s || []).some(q => q > 5)) out.push('유량은 모은 양 ÷ 걸린 시간 (mL/s). 5 mL/s보다 크면 모은 양을 넣은 것일 수 있음');
   if (document.querySelector('[data-bad-mask]')) out.push('뺄 구간 형식: 69-999, 120-130');
   if (state.columns) {
     const cols = state.columns.get(c.run);
