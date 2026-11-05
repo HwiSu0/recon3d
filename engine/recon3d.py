@@ -908,6 +908,17 @@ def main():
     except StopIteration:
         pass
 
+def swapped_sensors(data, sensors, I):
+    """측정한 코일 자기장 크기가 설정 위치보다 다른 센서 위치에 맞으면 두 센서를 돌려준다. 코일 자기장은 위치마다 크기가 달라서 구별된다."""
+    keys = list(data); out = []
+    m = {k: math.log(np.linalg.norm(data[k]['b0'])) for k in keys}
+    c = {k: math.log(np.linalg.norm(B0lab(sensors[k], I)[0])) for k in keys}
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            now = abs(m[a] - c[a]) + abs(m[b] - c[b]); cross = abs(m[a] - c[b]) + abs(m[b] - c[a])
+            if now > 0.15 and cross < now - 0.1: out.append([a, b])
+    return out
+
 def finish(ctx, results, sols):
     """고른 답으로 표, 내경, 결과 파일을 만든다."""
     cfg = ctx.cfg; tt = ctx.tw; data = ctx.dw; I = ctx.I
@@ -918,6 +929,7 @@ def finish(ctx, results, sols):
     summ = summarize(model, sols[0], N); summ['chi2_per_N_no_iron_model'] = z
     summ['noise_uT'] = {k: round(float(d['noise']), 3) for k, d in data.items()}
     summ['fit_window'] = [round(float(v), 1) for v in ctx.win]
+    summ['sensors_swapped'] = swapped_sensors(data, model.g.sensors, I)
     pb = model.unpack(sols[0].x)
     summ['at_limit'] = bool(pb['U0'] > 29 or pb['tau'] < 0.12)      # 앞머리가 지나가는 신호로 보기 어려운 답
     summ['alternatives'] = [summarize(model, s, N) for s in sols[1:4]]
