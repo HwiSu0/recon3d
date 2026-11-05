@@ -140,7 +140,7 @@ class Model:
         # phys = {'d_stem': 3, 'd_br': [3, 5], 'split': [0.75, 0.25] or None}
         #  -> 같은 농도라고 보고 lambda_k = lambda0 x (d_k/d_stem)^2,
         #     유량 보존: U_k = U0 x (A_stem/A_k) x f_k  (f_k = 갈래 k로 가는 유량 비율)
-        self.g = geo; self.nb = nb; self.phys = phys
+        self.g = geo; self.nb = nb; self.phys = phys; self.kind = 'y' if nb >= 2 else 'single'
         lo = abc2lab([bounds_abc['a'][0], bounds_abc['b'][0], bounds_abc['c'][0]])
         hi = abc2lab([bounds_abc['a'][1], bounds_abc['b'][1], bounds_abc['c'][1]])
         self.plo = np.minimum(lo, hi); self.phi = np.maximum(lo, hi)
@@ -167,6 +167,24 @@ class Model:
             out['lam'] = list(q[i:i + self.nb]); i += self.nb
         out['tau'] = q[i]
         return out
+
+    def nodes(self, p):
+        g = self.g
+        if self.nb == 1: return [[lab2abc(g.inlet), lab2abc(p['C'][0]), lab2abc(g.outlets[0])]]
+        return [[lab2abc(g.inlet), lab2abc(p['J'])]] + [[lab2abc(p['J']), lab2abc(p['C'][k]), lab2abc(g.outlets[k])] for k in range(self.nb)]
+
+    def init_geom(self, rng, i):
+        g = self.g; span = self.phi - self.plo; a_only = np.array([1.0, 0, 0]); not_a = np.array([0, 1.0, 1.0])
+        q = []; J = g.inlet
+        if self.nb >= 2:
+            if i % 2 == 0: J = g.inlet + rng.uniform(0, 0.4) * span * a_only + rng.normal(0, 1.0, 3) * not_a
+            else: J = self.plo + rng.uniform(0, 1, 3) * span * np.array([0.6, 1, 1])
+            J = np.clip(J, self.plo, self.phi); q += list(J)
+        for k in range(self.nb):
+            if i % 3 == 2: C = self.plo + rng.uniform(0, 1, 3) * span
+            else: C = (J + g.outlets[k]) / 2 + rng.normal(0, 1.5, 3)
+            q += list(np.clip(C, self.plo, self.phi))
+        return q
 
     def tail_guess(self, cfg, tt, rng, tg=None):
         if tg is None: tg = cfg.get('t_front_guess', float(tt[0]) + 5)
@@ -223,7 +241,181 @@ class Model:
             add(g.out_G[k], tJ + (Lb + so) / p['U'][k], p['lam'][k])
         return out
 
-def residuals(model, data, tt, rotfree=True, drift=False, tb=0.0):
+class ModelLoop:
+    """갈라졌다가 다시 모이는 관: 입구 -> J1(분기) -> 갈래 k (꺾이는 점 C_k) -> J2(합류) -> 출구 1개.
+    합류 뒤 관은 입구 관과 같은 굵기·속도·철 양이라고 봄. 합류 뒤 앞머리는 먼저 도착한 갈래에서 시작."""
+    def __init__(self, geo, bounds_abc, out_index=0, tie=False):
+        self.g = geo; self.nb = 2; self.kind = 'loop'; self.oi = out_index; self.phys = None; self.tie = tie
+        lo = abc2lab([bounds_abc['a'][0], bounds_abc['b'][0], bounds_abc['c'][0]])
+        hi = abc2lab([bounds_abc['a'][1], bounds_abc['b'][1], bounds_abc['c'][1]])
+        self.plo = np.minimum(lo, hi); self.phi = np.maximum(lo, hi)
+    def unpack(self, q):
+        if self.tie:   # 두 갈래 굵기·농도가 같음: 철 양 하나
+            return {'J': q[0:3], 'J2': q[3:6], 'C': [q[6:9], q[9:12]], 't0': q[12], 'U0': q[13], 'U': [q[14], q[15]],
+                    'lam0': q[16], 'lam': [q[16], q[16]], 'tau': q[17]}
+        return {'J': q[0:3], 'J2': q[3:6], 'C': [q[6:9], q[9:12]], 't0': q[12], 'U0': q[13], 'U': [q[14], q[15]],
+                'lam0': q[16], 'lam': [q[17], q[18]], 'tau': q[19]}
+    def bounds(self):
+        if self.tie:
+            lo = list(self.plo) * 4 + [-60, 0.3, 0.1, 0.1, 0.0, 0.1]; hi = list(self.phi) * 4 + [200, 30, 30, 30, 3.0, 20]
+        else:
+            lo = list(self.plo) * 4 + [-60, 0.3, 0.1, 0.1, 0.0, 0.0, 0.0, 0.1]
+            hi = list(self.phi) * 4 + [200, 30, 30, 30, 3.0, 3.0, 3.0, 20]
+        return np.array(lo, float), np.array(hi, float)
+    def paths(self, p):
+        g = self.g; O = g.outlets[self.oi]
+        return {'stem': g.polyline([g.inlet, p['J']]), 'br': [g.polyline([p['J'], p['C'][k], p['J2']]) for k in range(2)],
+                'merge': g.polyline([p['J2'], O])}
+    def nodes(self, p):
+        g = self.g; O = g.outlets[self.oi]
+        return [[lab2abc(g.inlet), lab2abc(p['J'])], [lab2abc(p['J']), lab2abc(p['C'][0]), lab2abc(p['J2'])],
+                [lab2abc(p['J']), lab2abc(p['C'][1]), lab2abc(p['J2'])], [lab2abc(p['J2']), lab2abc(O)]]
+    def init_geom(self, rng, i):
+        g = self.g; span = self.phi - self.plo; O = g.outlets[self.oi]
+        a_only = np.array([1.0, 0, 0]); not_a = np.array([0, 1.0, 1.0])
+        if i % 2 == 0: J1 = g.inlet + rng.uniform(0, 0.35) * span * a_only + rng.normal(0, 1.0, 3) * not_a
+        else: J1 = self.plo + rng.uniform(0, 1, 3) * span * np.array([0.5, 1, 1])
+        if i % 2 == 0: J2 = O - rng.uniform(0, 0.35) * span * a_only + rng.normal(0, 1.0, 3) * not_a
+        else: J2 = self.plo + span * (np.array([0.5, 0, 0]) + rng.uniform(0, 1, 3) * np.array([0.5, 1, 1]))
+        J1 = np.clip(J1, self.plo, self.phi); J2 = np.clip(J2, self.plo, self.phi)
+        mid = (J1 + J2) / 2; q = list(J1) + list(J2)
+        for k, sgn in enumerate([-1, 1]):
+            if i % 3 == 2: C = self.plo + rng.uniform(0, 1, 3) * span
+            else: C = mid + np.array([0, 0, sgn * rng.uniform(1.0, 3.5)]) + rng.normal(0, 1.0, 3)
+            q += list(np.clip(C, self.plo, self.phi))
+        return q
+    def tail_guess(self, cfg, tt, rng, tg=None):
+        if tg is None: tg = cfg.get('t_front_guess', float(tt[0]) + 5)
+        tg = tg + rng.uniform(-3, 4)
+        Ug = float(np.exp(rng.uniform(np.log(0.7), np.log(7.0)))) if cfg.get('U_guess') is None else cfg['U_guess'] * rng.uniform(0.5, 2.0)
+        return [tg, Ug, Ug * 0.6, Ug * 0.6, 0.1, 2.0] if self.tie else [tg, Ug, Ug * 0.6, Ug * 0.6, 0.1, 0.1, 0.1, 2.0]
+    def predict(self, q, tt):
+        p = self.unpack(q); g = self.g; P = self.paths(p)
+        tau = p['tau']; sig = lambda x: 0.5 * (1 + np.tanh(x / (2 * tau)))
+        out = {k: np.zeros((len(tt), 3)) for k in g.sensors}
+        def add(G, tarr, lam):
+            L = lam * sig(tt[:, None] - tarr[None])
+            for k in out: out[k] += L @ G[k]
+        add(g.up_G, p['t0'] + g.up_s / p['U0'], p['lam0'])
+        sp, ss, LJ = P['stem']
+        if len(sp): add(g.unit_field(sp), p['t0'] + ss / p['U0'], p['lam0'])
+        tJ = p['t0'] + LJ / p['U0']; arr = []
+        for k, (pts, s, Lb) in enumerate(P['br']):
+            if len(pts): add(g.unit_field(pts), tJ + s / p['U'][k], p['lam'][k])
+            arr.append(tJ + Lb / p['U'][k])
+        tJ2 = min(arr)
+        mp, ms, LM = P['merge']
+        if len(mp): add(g.unit_field(mp), tJ2 + ms / p['U0'], p['lam0'])
+        op, so = g.out_pts[self.oi]
+        add(g.out_G[self.oi], tJ2 + (LM + so) / p['U0'], p['lam0'])
+        return out
+
+class ModelStep:
+    """중간에 굵어지는(또는 가늘어지는) 한 줄 관: 입구 -> (꺾이는 점 C) -> 출구, 관을 따라 sf 비율 지점 P에서 굵기가 바뀜.
+    같은 현탁액이므로 철 양은 단면적에 비례(lam0 -> lam1), 속도는 단면적에 반비례(U1 = U0 * lam0 / lam1)."""
+    def __init__(self, geo, bounds_abc, out_index=0, tie_speed=True, outside_after=True):
+        self.g = geo; self.nb = 1; self.kind = 'step'; self.oi = out_index; self.phys = None
+        self.tie = tie_speed; self.oa = outside_after
+        lo = abc2lab([bounds_abc['a'][0], bounds_abc['b'][0], bounds_abc['c'][0]])
+        hi = abc2lab([bounds_abc['a'][1], bounds_abc['b'][1], bounds_abc['c'][1]])
+        self.plo = np.minimum(lo, hi); self.phi = np.maximum(lo, hi)
+    def unpack(self, q):
+        p = {'C': [q[0:3]], 'sf': q[3], 't0': q[4], 'U0': q[5], 'lam0': q[6], 'lam': [q[7]], 'tau': q[8]}
+        p['U'] = [p['U0'] * p['lam0'] / max(p['lam'][0], 1e-6)] if self.tie else [q[9]]
+        if self.tie: p['U'][0] = min(p['U'][0], 60.0)
+        return p
+    def bounds(self):
+        lo = list(self.plo) + [0.05, -60, 0.3, 0.0, 0.0, 0.1]; hi = list(self.phi) + [0.95, 200, 30, 3.0, 6.0, 20]
+        if not self.tie: lo += [0.1]; hi += [30]
+        return np.array(lo, float), np.array(hi, float)
+    def _line(self, p):
+        g = self.g; return [g.inlet, p['C'][0], g.outlets[self.oi]]
+    def point_at(self, p):
+        nodes = self._line(p); seg = [np.linalg.norm(b - a) for a, b in zip(nodes[:-1], nodes[1:])]
+        L = sum(seg); target = p['sf'] * L; acc = 0
+        for (a, b), l in zip(zip(nodes[:-1], nodes[1:]), seg):
+            if acc + l >= target and l > 0: return a + (b - a) * (target - acc) / l, L, target
+            acc += l
+        return nodes[-1], L, target
+    def paths(self, p):
+        pts, s, L = self.g.polyline(self._line(p))
+        return {'stem': (np.zeros((0, 3)), np.zeros(0), 0.0), 'br': [(pts, s, L)]}
+    def nodes(self, p):
+        nodes = self._line(p); P, L, sP = self.point_at(p)
+        seg = np.cumsum([0] + [np.linalg.norm(b - a) for a, b in zip(nodes[:-1], nodes[1:])])
+        first = [lab2abc(n) for n, sv in zip(nodes, seg) if sv < sP - 1e-9] + [lab2abc(P)]
+        second = [lab2abc(P)] + [lab2abc(n) for n, sv in zip(nodes, seg) if sv > sP + 1e-9]
+        return [first, second]
+    def init_geom(self, rng, i):
+        g = self.g; span = self.phi - self.plo; O = g.outlets[self.oi]
+        C = (g.inlet + O) / 2 + rng.normal(0, 1.5, 3) if i % 3 != 2 else self.plo + rng.uniform(0, 1, 3) * span
+        return list(np.clip(C, self.plo, self.phi)) + [rng.uniform(0.2, 0.8)]
+    def tail_guess(self, cfg, tt, rng, tg=None):
+        if tg is None: tg = cfg.get('t_front_guess', float(tt[0]) + 5)
+        tg = tg + rng.uniform(-3, 4)
+        Ug = float(np.exp(rng.uniform(np.log(0.7), np.log(7.0)))) if cfg.get('U_guess') is None else cfg['U_guess'] * rng.uniform(0.5, 2.0)
+        r = rng.uniform(0.5, 3.5)
+        q = [tg, Ug, 0.05, 0.05 * r, 2.0]
+        return q if self.tie else q + [Ug / r]
+    def predict(self, q, tt):
+        p = self.unpack(q); g = self.g
+        tau = p['tau']; sig = lambda x: 0.5 * (1 + np.tanh(x / (2 * tau)))
+        out = {k: np.zeros((len(tt), 3)) for k in g.sensors}
+        def add(G, tarr, lam):
+            L = lam * sig(tt[:, None] - tarr[None])
+            for k in out: out[k] += L @ G[k]
+        U0, U1, l0, l1 = p['U0'], p['U'][0], p['lam0'], p['lam'][0]
+        add(g.up_G, p['t0'] + g.up_s / U0, l0)
+        pts, s, L = g.polyline(self._line(p)); sP = p['sf'] * L
+        if len(pts):
+            G = g.unit_field(pts); m = s < sP; tP = p['t0'] + sP / U0
+            tarr = np.where(m, p['t0'] + s / U0, tP + (s - sP) / U1)
+            Lm = np.where(m, l0, l1)
+            Ls = Lm[None] * sig(tt[:, None] - tarr[None])
+            for k in out: out[k] += Ls @ G[k]
+        op, so = g.out_pts[self.oi]
+        tP = p['t0'] + sP / U0
+        add(g.out_G[self.oi], tP + (L - sP + so) / U1, l1 if self.oa else l0)
+        return out
+
+def node_chains(model, p):
+    """흐르는 순서대로 이은 점들 (lab 좌표). 사전 조건(곧게, 내리막)을 걸 때 씀."""
+    g = model.g
+    if model.kind == 'loop':
+        O = g.outlets[model.oi]
+        return [[g.inlet, p['J']], [p['J'], p['C'][0], p['J2']], [p['J'], p['C'][1], p['J2']], [p['J2'], O]]
+    if model.kind == 'step':
+        return [[g.inlet, p['C'][0], g.outlets[model.oi]]]
+    if model.nb == 1: return [[g.inlet, p['C'][0], g.outlets[0]]]
+    return [[g.inlet, p['J']]] + [[p['J'], p['C'][k], g.outlets[k]] for k in range(model.nb)]
+
+def prior_res(model, q, prior):
+    """사전 조건: (1) 꺾이는 점이 양 끝을 이은 직선에서 벗어나는 거리 / sigma  (2) 오르막이면 벌점"""
+    p = model.unpack(q); r = []
+    sig = prior.get('straight_sigma_cm'); dh = prior.get('downhill', False)
+    for ch in node_chains(model, p):
+        ch = [np.asarray(x, float) for x in ch]
+        if sig and len(ch) == 3:
+            A, C, B = ch; d = B - A; L = np.linalg.norm(d)
+            if L > 1e-6:
+                v = C - A; dn = d / L; perp = v - (v @ dn) * dn; r += list(perp / sig)
+        if dh:
+            for a, b in zip(ch[:-1], ch[1:]):
+                r.append(max(0.0, b[1] - a[1] - prior.get('flat_tol_cm', 0.3)) / prior.get('downhill_sigma_cm', 0.2))
+    return np.array(r)
+
+def make_model(kind, geo, cfg):
+    if kind == 'step':
+        return ModelStep(geo, cfg['box'], cfg.get('loop_outlet', 0), cfg.get('step_tie_speed', True), cfg.get('step_outside_after', True))
+    if kind == 'loop':
+        hm = cfg.get('hose_mm') or {}
+        tie = cfg.get('tie_lambda', bool(hm) and all(abs(d - hm.get('stem', 3)) < 1e-6 for d in hm.get('branches', [3, 3])))
+        return ModelLoop(geo, cfg['box'], cfg.get('loop_outlet', 0), tie)
+    nb = 1 if kind == 'single' else len(cfg['outlets'])
+    m = Model(geo, nb, cfg['box'], cfg.get('phys'))
+    return m
+
+def residuals(model, data, tt, rotfree=True, drift=False, tb=0.0, prior=None):
     U = {k: B0lab(model.g.sensors[k], model.g.I)[0] for k in data}
     U = {k: v / np.linalg.norm(v) for k, v in U.items()}
     RA = {k: rot_align(data[k]['b0'], U[k] * np.linalg.norm(data[k]['b0'])) for k in data}
@@ -236,6 +428,7 @@ def residuals(model, data, tt, rotfree=True, drift=False, tb=0.0):
                 x = fit_one(x, y, U[k], w, rotfree, tt - tb)
             elif rotfree: x, _ = best_psi(x, y, U[k], w)
             r.append((((x - y) * w[:, None]) / data[k]['noise']).ravel())
+        if prior: r.append(prior_res(model, q, prior))
         return np.concatenate(r)
     return f, Y, U
 
@@ -255,33 +448,20 @@ def auto_t_on(tt, data):
     thr = s.min() + 0.3 * (s.max() - s.min())
     return float(tt[int(np.argmax(s > thr))])
 
-def fit(cfg, tt, data, geo, nb):
+def fit(cfg, tt, data, geo, kind):
     """여러 시작점에서 짧게 맞춰 본 뒤(1단계), 잘 맞은 몇 개만 끝까지 맞춤(2단계)."""
-    model = Model(geo, nb, cfg['box'], cfg.get('phys'))
+    model = make_model(kind, geo, cfg)
     b0a, b0b = cfg.get('baseline', [2, 12])
-    f, Y, U = residuals(model, data, tt, drift=cfg.get('drift', False), tb=(b0a + b0b) / 2)
+    f, Y, U = residuals(model, data, tt, drift=cfg.get('drift', False), tb=(b0a + b0b) / 2, prior=cfg.get('prior'))
     lo, hi = model.bounds()
     rng = np.random.default_rng(cfg.get('seed', 0))
     t_on = auto_t_on(tt, data)
     tg_list = [t_on] + ([cfg['t_front_guess']] if cfg.get('t_front_guess') is not None else [])
     print(f'  신호가 커지기 시작한 시각(자동): {t_on:.1f} s', flush=True)
-    span = model.phi - model.plo
-    a_only = np.array([1.0, 0, 0]); not_a = np.array([0, 1.0, 1.0])
     starts = []
-    nstart = cfg.get('starts', 16)
+    nstart = cfg.get('starts', 16) * (2 if model.kind == 'loop' else 1)
     for i in range(nstart):
-        q = []
-        J = geo.inlet
-        if nb >= 2:
-            if i % 2 == 0:   # 입구 근처
-                J = geo.inlet + rng.uniform(0, 0.4) * span * a_only + rng.normal(0, 1.0, 3) * not_a
-            else:            # 상자 앞쪽 60% 아무 데나
-                J = model.plo + rng.uniform(0, 1, 3) * span * np.array([0.6, 1, 1])
-            J = np.clip(J, model.plo, model.phi); q += list(J)
-        for k in range(nb):
-            if i % 3 == 2: C = model.plo + rng.uniform(0, 1, 3) * span
-            else: C = (J + geo.outlets[k]) / 2 + rng.normal(0, 1.5, 3)
-            q += list(np.clip(C, model.plo, model.phi))
+        q = model.init_geom(rng, i)
         q += model.tail_guess(cfg, tt, rng, tg_list[i % len(tg_list)])
         starts.append(np.clip(np.array(q, float), lo + 1e-6, hi - 1e-6))
     sols1 = []
@@ -306,7 +486,13 @@ def fit(cfg, tt, data, geo, nb):
 def geom_from_truth(model, truth):
     """truth polylines -> geometry part of the parameter vector (None if the shape does not fit the model)."""
     g = []
+    mid = lambda pl: abc2lab((np.array(pl[0]) + np.array(pl[-1])) / 2) if len(pl) == 2 else abc2lab(pl[len(pl) // 2])
+    if model.kind == 'step': return None
+    if model.kind == 'loop':
+        if len(truth) != 4: return None
+        return np.array(list(abc2lab(truth[0][-1])) + list(abc2lab(truth[3][0])) + list(mid(truth[1])) + list(mid(truth[2])))
     if model.nb == 1:
+        if len(truth) != 1: return None
         pl = truth[0]
         if len(pl) == 2: c = (np.array(pl[0]) + np.array(pl[1])) / 2
         elif len(pl) == 3: c = np.array(pl[1])
@@ -345,6 +531,13 @@ def summarize(model, s, N):
            'lam0': float(p['lam0']), 'lam': [float(l) for l in p['lam']], 'tau': float(p['tau']),
            'C': [lab2abc(c) for c in p['C']]}
     if model.nb >= 2: res['J'] = lab2abc(p['J'])
+    res['topology'] = model.kind
+    if model.kind == 'step':
+        P_, L_, sP_ = model.point_at(p)
+        res['P'] = lab2abc(P_); res['step_s_cm'] = float(sP_); res['lam_ratio'] = float(p['lam'][0] / max(p['lam0'], 1e-9))
+        res['diam_ratio'] = float(np.sqrt(max(res['lam_ratio'], 0)))
+    if model.kind == 'loop':
+        res['J2'] = lab2abc(p['J2']); res['merge_len_cm'] = float(P['merge'][2])
     if 'f' in p: res['flow_split'] = [float(x) for x in p['f']]
     res['branch_len_cm'] = [float(b[2]) for b in P['br']]
     res['stem_len_cm'] = float(P['stem'][2])
@@ -361,15 +554,19 @@ def _dense(nodes, step=0.1):
 def path_error(model, s, truth):
     """truth: list of polylines in (a,b,c), same order as the drawn best path (nb>=2: stem, branch1, branch2...).
     Returns, per piece, mean and max distance (cm) between the fitted and true curves (both directions)."""
-    p = model.unpack(s.x); g = model.g
-    if model.nb == 1: best = [[lab2abc(g.inlet), lab2abc(p['C'][0]), lab2abc(g.outlets[0])]]
-    else: best = [[lab2abc(g.inlet), lab2abc(p['J'])]] + [[lab2abc(p['J']), lab2abc(p['C'][k]), lab2abc(g.outlets[k])] for k in range(model.nb)]
-    out = []
-    for b, t in zip(best, truth):
+    p = model.unpack(s.x); best = model.nodes(p)
+    def err(b, t):
         A = _dense(b); B = _dense(t)
         d = np.linalg.norm(A[:, None] - B[None], axis=2)
         dd = np.concatenate([d.min(1), d.min(0)])
-        out.append({'mean': round(float(dd.mean()), 2), 'max': round(float(dd.max()), 2)})
+        return {'mean': round(float(dd.mean()), 2), 'max': round(float(dd.max()), 2)}
+    if len(best) != len(truth):          # 구조가 다르면: 전체 관끼리 비교
+        allb = [q for pl in best for q in _dense(pl)]; allt = [q for pl in truth for q in _dense(pl)]
+        return [err(allb, allt)]
+    out = [err(b, t) for b, t in zip(best, truth)]
+    if model.kind == 'loop':             # 두 갈래는 이름이 바뀌어도 같은 모양
+        sw = [err(best[1], truth[2]), err(best[2], truth[1])]
+        if sw[0]['mean'] + sw[1]['mean'] < out[1]['mean'] + out[2]['mean']: out[1], out[2] = sw[0], sw[1]
     return out
 
 def geom_payload(cfg, nb):
@@ -386,10 +583,7 @@ def geom_payload(cfg, nb):
 # ---------------- html ----------------
 def html(cfg, model, sols, Y, U, tt, N, data, summ):
     best = sols[0]; p = model.unpack(best.x)
-    def path_nodes(pp):
-        g = model.g
-        if model.nb == 1: return [[lab2abc(g.inlet), lab2abc(pp['C'][0]), lab2abc(g.outlets[0])]]
-        return [[lab2abc(g.inlet), lab2abc(pp['J'])]] + [[lab2abc(pp['J']), lab2abc(pp['C'][k]), lab2abc(g.outlets[k])] for k in range(model.nb)]
+    path_nodes = model.nodes
     alt = []
     for s in sols[1:6]:
         if 2 * (s.cost - best.cost) < cfg.get('alt_dchi2', 50): alt.append(path_nodes(model.unpack(s.x)))
@@ -408,9 +602,13 @@ def html(cfg, model, sols, Y, U, tt, N, data, summ):
                'best': path_nodes(p), 'alt': alt, 'truth': cfg.get('truth'),
                'summary': summ, 't': [round(float(x), 2) for x in tt], 'traces': traces,
                'outlet_names': cfg.get('outlet_names', [f'출구{i+1}' for i in range(len(cfg['outlets']))]),
-               'geom': geom_payload(cfg, model.nb)}
+               'geom': geom_payload(cfg, model.nb), 'topology': model.kind,
+               'all_outlets': cfg.get('_all_outlets', cfg['outlets']), 'all_outlet_names': cfg.get('_all_names'),
+               'loop_outlet': getattr(model, 'oi', None)}
     tpl = open(__file__.replace('recon3d.py', 'template.html'), encoding='utf-8').read()
     return tpl.replace('__DATA__', json.dumps(payload, ensure_ascii=False))
+
+KIND_NAME = {'single': '한 줄 관', 'y': 'Y자 (갈래마다 다른 출구)', 'loop': '갈라졌다 다시 모이는 관', 'step': '중간에 굵기가 바뀌는 한 줄 관'}
 
 def main():
     if len(sys.argv) < 2:
@@ -426,36 +624,70 @@ def main():
     tt, data, I = load(cfg)
     print(f"  시간 {tt[0]:.1f}~{tt[-1]:.1f}초, 전류 {I:.3f} A, 잡음(μT) " + ', '.join(f'{k} {d["noise"]:.2f}' for k, d in data.items()), flush=True)
     print(f"경로 맞추는 중 (시작점 {cfg.get('starts', 10)}개, 보통 1분 안쪽)...", flush=True)
-    geo = Geometry(cfg, I)
     nb = len(cfg['outlets'])
-    model, sols, Y, U, f = fit(cfg, tt, data, geo, nb)
+    all_names = cfg.get('outlet_names', [f'출구{i+1}' for i in range(nb)])
+    topo = cfg.get('topology', 'y' if nb >= 2 else 'auto')
+    # 출구 고르기: "exit": "auto"(출구마다 다 맞춰 보고 고름) 또는 출구 번호(0부터)
+    exit_sel = cfg.get('exit', 'auto' if (nb >= 2 and topo != 'y') else 0)
+    one = cfg.get('candidates', ['single', 'step', 'loop']) if topo == 'auto' else ([topo] if topo != 'y' else [])
+    exits = list(range(nb)) if exit_sel == 'auto' else [int(exit_sel)]
+    cands = [(k, [i]) for i in exits for k in one]
+    if topo == 'y' or (topo == 'auto' and nb >= 2 and cfg.get('try_y', True)): cands.append(('y', list(range(nb))))
+    results = []; geos = {}
+    print(f"후보 {len(cands)}개", flush=True)
+    for kind, idx in cands:
+        ccfg = dict(cfg); ccfg['outlets'] = [cfg['outlets'][i] for i in idx]; ccfg['outlet_names'] = [all_names[i] for i in idx]
+        key = tuple(idx)
+        if key not in geos: geos[key] = Geometry(ccfg, I)
+        label = KIND_NAME[kind] + (f' · {all_names[idx[0]]}' if (nb >= 2 and kind != 'y') else '')
+        print(f"== 후보: {label}", flush=True)
+        model, sols, Y, U, f = fit(ccfg, tt, data, geos[key], kind)
+        Nk = len(sols[0].fun); chi2 = 2 * sols[0].cost; npar = len(sols[0].x)
+        results.append({'kind': kind, 'label': label, 'idx': idx, 'cfg': ccfg, 'model': model, 'sols': sols, 'Y': Y, 'U': U, 'f': f,
+                        'chi2_per_N': chi2 / Nk, 'bic': chi2 + npar * np.log(Nk), 'npar': npar})
+        print(f"   {label}: chi2/N = {chi2 / Nk:.3f}, BIC = {chi2 + npar * np.log(Nk):.0f}", flush=True)
+    results.sort(key=lambda r: r['bic'])
+    r0 = results[0]; model, sols, Y, U, f = r0['model'], r0['sols'], r0['Y'], r0['U'], r0['f']
+    used_cfg = r0['cfg']; used_cfg['_all_outlets'] = cfg['outlets']; used_cfg['_all_names'] = all_names
     N = len(sols[0].fun)
     z = float(np.sum(np.concatenate([(Y[k] * data[k]['w'][:, None] / data[k]['noise']).ravel() for k in Y]) ** 2) / N)
     summ = summarize(model, sols[0], N); summ['chi2_per_N_no_iron_model'] = z
     summ['noise_uT'] = {k: round(float(d['noise']), 3) for k, d in data.items()}
     summ['alternatives'] = [summarize(model, s, N) for s in sols[1:4]]
+    if len(results) > 1:
+        summ['topology_compare'] = [{'kind': r['kind'], 'name': r['label'], 'chi2_per_N': round(float(r['chi2_per_N']), 3),
+                                     'bic': round(float(r['bic']), 1), 'npar': r['npar']} for r in results]
+    summ['exit_used'] = used_cfg['outlet_names']
+    if cfg.get('truth_points'):          # 실제 경로의 일부 점만 알 때 (예: 분기점, 합류점)
+        tp = cfg['truth_points']; tpe = {}
+        for key, val in tp.items():
+            if key in summ: tpe[key] = round(float(np.linalg.norm(np.array(summ[key]) - np.array(val))), 2)
+        summ['truth_point_error_cm'] = tpe
     if cfg.get('truth'):
         summ['truth_error_cm'] = path_error(model, sols[0], cfg['truth'])
         st = fit_truth(model, f, sols[0], cfg['truth'])
         if st is not None:
             summ['truth_fit'] = summarize(model, st, N)
             summ['chi2_per_N_truth_path'] = summ['truth_fit']['chi2_per_N']
-    if cfg.get('thickness', True):      # 호스 안지름 추정 (실패해도 복원 결과는 그대로 저장)
+    if cfg.get('thickness', True):      # 호스 내경 추정 (실패해도 복원 결과는 그대로 저장)
         print('호스 굵기 추정 중...', flush=True)
         try:
             import thickness
+            tcfg = dict(used_cfg)
+            flows = cfg.get('flow_mL_s') or []
+            tcfg['flow_mL_s'] = [flows[i] if i < len(flows) else None for i in r0['idx']]
             best_p = model.unpack(sols[0].x)
-            summ['thickness'] = thickness.estimate(cfg, tt, data, I, model, {k: best_p[k] for k in ('J', 'C') if k in best_p})
+            summ['thickness'] = thickness.estimate(tcfg, tt, data, I, model, {k: best_p[k] for k in ('J', 'J2', 'C', 'sf') if k in best_p})
             for pc in summ['thickness']['pieces']:
-                print(f"  {pc['name']}: 앞머리 속도 {pc['U']:.2f} cm/s, 안지름 {pc.get('d_mm', '-')} mm" if pc['resolved'] else f"  {pc['name']}: 판정 불가", flush=True)
+                print(f"  {pc['name']}: 앞머리 속도 {pc['U']:.2f} cm/s, 내경 {pc.get('d_mm', '-')} mm" if pc['resolved'] else f"  {pc['name']}: 판정 불가", flush=True)
         except Exception as e:
             print('  굵기 추정 실패:', e, flush=True)
             summ['thickness'] = {'error': str(e)}
     out = cfg.get('out', f"recon_run{cfg['run']}")
     if os.path.dirname(out): os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump(summ, open(out + '.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
-    open(out + '.html', 'w', encoding='utf-8').write(html(cfg, model, sols, Y, U, tt, N, data, summ))
-    print(json.dumps({k: summ[k] for k in ['chi2_per_N', 'chi2_per_N_truth_path', 'chi2_per_N_no_iron_model', 'J', 'C', 'U0', 'U', 'flow_split', 'lam', 'branch_len_cm', 'truth_error_cm'] if k in summ}, ensure_ascii=False, indent=1))
+    open(out + '.html', 'w', encoding='utf-8').write(html(used_cfg, model, sols, Y, U, tt, N, data, summ))
+    print(json.dumps({k: summ[k] for k in ['topology', 'exit_used', 'topology_compare', 'P', 'diam_ratio', 'chi2_per_N', 'chi2_per_N_truth_path', 'chi2_per_N_no_iron_model', 'J', 'J2', 'C', 'U0', 'U', 'flow_split', 'lam', 'branch_len_cm', 'truth_error_cm', 'truth_point_error_cm'] if k in summ}, ensure_ascii=False, indent=1))
     print('saved', out + '.json', out + '.html')
 
 if __name__ == '__main__':

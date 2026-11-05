@@ -98,9 +98,13 @@ function normalize(cfg) {
   return cfg;
 }
 
+function keepTruth(cfg) {
+  state.truth = cfg.truth || cfg.truth_points ? clone({ truth: cfg.truth, truth_points: cfg.truth_points }) : null;
+}
+
 function setConfig(cfg) {
   state.cfg = normalize(cfg);
-  state.truth = cfg.truth ? clone(cfg.truth) : null;
+  keepTruth(cfg);
   fillForm();
   $('cfgError').hidden = true;
   $('cfgText').value = JSON.stringify(cfg, null, 2);
@@ -129,9 +133,23 @@ function fillForm() {
   $('fBase0').value = val(c.baseline && c.baseline[0]); $('fBase1').value = val(c.baseline && c.baseline[1]);
   $('fWin0').value = val(c.t_window && c.t_window[0]); $('fWin1').value = val(c.t_window && c.t_window[1]);
   $('fUp').value = val(c.upstream_len); $('fOut').value = val(c.outlet_len);
+  $('fStem').value = val(c.hose_mm.stem);
+  $('fBranches').value = (c.hose_mm.branches || []).join(', ');
+  delete $('fBranches').dataset.bad;
   fillRun(); fillSensors(); fillPorts();
   $('fTruth').disabled = !state.truth;
-  $('fTruth').checked = !!c.truth;
+  $('fTruth').checked = !!(c.truth || c.truth_points);
+}
+
+/* recon3d.py의 기본값과 같게 보여 준다 */
+function fillStructure() {
+  const c = state.cfg, nb = c.outlets.length;
+  const topo = c.topology || (nb >= 2 ? 'y' : 'auto');
+  $('fTopo').value = topo;
+  const exit = $('fExit');
+  exit.replaceChildren(new Option('자동 선택', 'auto'), ...c.outlet_names.map((name, i) => new Option(name, i)));
+  exit.value = c.exit !== undefined ? c.exit : (nb >= 2 && topo !== 'y' ? 'auto' : 0);
+  exit.disabled = nb < 2 || topo === 'y';
 }
 
 function maskText(ranges) { return (ranges || []).map(r => r.join('-')).join(', '); }
@@ -186,13 +204,11 @@ function fillPorts() {
   const inlet = body.insertRow();
   inlet.insertCell().textContent = '입구';
   ['a', 'b', 'c'].forEach((axis, i) => cell(inlet, numInput(c.inlet[i], `입구 ${axis}`, v => { c.inlet[i] = v; })));
-  cell(inlet, numInput(c.hose_mm.stem, '입구 쪽 호스 내경', v => { c.hose_mm.stem = v; }));
   inlet.insertCell(); inlet.insertCell();
   c.outlets.forEach((port, k) => {
     const row = body.insertRow();
-    cell(row, textInput(c.outlet_names[k], `출구 ${k + 1} 이름`, v => { c.outlet_names[k] = v; }));
+    cell(row, textInput(c.outlet_names[k], `출구 ${k + 1} 이름`, v => { c.outlet_names[k] = v; fillStructure(); }));
     ['a', 'b', 'c'].forEach((axis, i) => cell(row, numInput(port[i], `출구 ${k + 1} ${axis}`, v => { port[i] = v; })));
-    cell(row, numInput(c.hose_mm.branches[k], `출구 ${k + 1} 호스 내경`, v => { c.hose_mm.branches[k] = v; }));
     const flow = numInput(c.flow_mL_s ? c.flow_mL_s[k] : null, `출구 ${k + 1} 유량`, v => setFlow(k, v));
     flow.min = '0';
     cell(row, flow);
@@ -202,13 +218,15 @@ function fillPorts() {
       del.type = 'button'; del.className = 'del'; del.textContent = '×';
       del.setAttribute('aria-label', `출구 ${k + 1} 삭제`);
       del.addEventListener('click', () => {
-        c.outlets.splice(k, 1); c.outlet_names.splice(k, 1); c.hose_mm.branches.splice(k, 1);
+        c.outlets.splice(k, 1); c.outlet_names.splice(k, 1);
         if (c.flow_mL_s) c.flow_mL_s.splice(k, 1);
+        if (c.exit !== undefined && c.exit !== 'auto') c.exit = 0;
         fillPorts(); sync();
       });
       td.append(del);
     }
   });
+  fillStructure();
 }
 
 function wireFields() {
@@ -224,15 +242,27 @@ function wireFields() {
   bind('fWin1', v => { c().t_window = [c().t_window ? c().t_window[0] : null, toNum(v)]; });
   bind('fUp', v => optional('upstream_len', v));
   bind('fOut', v => optional('outlet_len', v));
+  bind('fStem', v => { c().hose_mm.stem = toNum(v); });
+  bind('fBranches', v => {
+    const list = v.split(',').map(s => s.trim()).filter(Boolean).map(Number);
+    const ok = list.length > 0 && list.every(d => Number.isFinite(d) && d > 0);
+    if (ok) { c().hose_mm.branches = list; delete $('fBranches').dataset.bad; } else $('fBranches').dataset.bad = '1';
+  });
+  $('fTopo').addEventListener('change', e => { c().topology = e.target.value; fillStructure(); sync(); });
+  $('fExit').addEventListener('change', e => { c().exit = e.target.value === 'auto' ? 'auto' : Number(e.target.value); sync(); });
   $('fTruth').addEventListener('change', e => {
-    if (e.target.checked && state.truth) c().truth = clone(state.truth); else delete c().truth;
+    if (e.target.checked && state.truth) {
+      if (state.truth.truth) c().truth = clone(state.truth.truth);
+      if (state.truth.truth_points) c().truth_points = clone(state.truth.truth_points);
+    } else {
+      delete c().truth; delete c().truth_points;
+    }
     sync();
   });
   $('addOutlet').addEventListener('click', () => {
     const cfg = c(), last = cfg.outlets[cfg.outlets.length - 1];
     cfg.outlets.push(last.slice());
     cfg.outlet_names.push(`출구${cfg.outlets.length}`);
-    cfg.hose_mm.branches.push(cfg.hose_mm.stem);
     if (cfg.flow_mL_s) cfg.flow_mL_s.push(null);
     fillPorts(); sync();
   });
@@ -258,7 +288,7 @@ function wireFields() {
       const cfg = JSON.parse(e.target.value);
       for (const key of ['sensors', 'inlet', 'outlets']) if (!cfg[key]) throw new Error(`"${key}" 항목 없음`);
       state.cfg = normalize(cfg);
-      if (cfg.truth) state.truth = clone(cfg.truth);
+      if (cfg.truth || cfg.truth_points) keepTruth(cfg);
       fillForm(); validate();
       $('cfgError').hidden = true;
     } catch (err) {
@@ -295,8 +325,7 @@ function checkConfig() {
   }
   if (!coord(c.inlet)) out.push('입구 좌표 입력');
   c.outlets.forEach((p, k) => { if (!coord(p)) out.push(`출구 ${k + 1} 좌표 입력`); });
-  const hoses = [c.hose_mm.stem, ...c.hose_mm.branches.slice(0, c.outlets.length)];
-  if (hoses.length !== c.outlets.length + 1 || !hoses.every(d => Number.isFinite(d) && d > 0)) out.push('호스 내경 입력');
+  if (!(c.hose_mm.stem > 0) || $('fBranches').dataset.bad) out.push('호스 내경 형식: 5 또는 3, 3');
   if ((c.flow_mL_s || []).some(q => q !== null && !(q > 0))) out.push('유량은 0보다 커야 함');
   if (document.querySelector('[data-bad-mask]')) out.push('뺄 구간 형식: 69-999, 120-130');
   if (state.columns) {
@@ -359,13 +388,19 @@ function handle(msg) {
 }
 
 /* recon3d.py의 진행 출력에서 단계를 읽는다 */
+const cand = { n: 1, i: 1 };
+function fitStage(done, text) {
+  const prefix = cand.n > 1 ? `후보 ${cand.i}/${cand.n} ` : '';
+  setStage(0.06 + 0.88 * (cand.i - 1 + done) / cand.n, prefix + text);
+}
 function track(line) {
   let m;
   if (/불러오는 중/.test(line)) setStage(0.04, '데이터 읽는 중');
-  else if (/경로 맞추는 중/.test(line)) setStage(0.08, '경로 맞춤');
-  else if ((m = line.match(/1단계 (\d+)\/(\d+)/))) setStage(0.08 + 0.62 * m[1] / m[2], `경로 맞춤 ${m[1]}/${m[2]}`);
-  else if ((m = line.match(/2단계 (\d+)\/(\d+)/))) setStage(0.7 + 0.25 * m[1] / m[2], `후보 정밀 맞춤 ${m[1]}/${m[2]}`);
-  else if (/굵기 추정 중/.test(line)) setStage(0.96, '안지름 추정');
+  else if ((m = line.match(/^후보 (\d+)개/))) { cand.n = Number(m[1]); cand.i = 0; }
+  else if (/^== 후보/.test(line)) { cand.i += 1; fitStage(0, '경로 맞춤'); }
+  else if ((m = line.match(/1단계 (\d+)\/(\d+)/))) fitStage(0.8 * m[1] / m[2], `경로 맞춤 ${m[1]}/${m[2]}`);
+  else if ((m = line.match(/2단계 (\d+)\/(\d+)/))) fitStage(0.8 + 0.2 * m[1] / m[2], `정밀 맞춤 ${m[1]}/${m[2]}`);
+  else if (/굵기 추정 중/.test(line)) setStage(0.96, '내경 추정');
 }
 
 function explain(message) {
@@ -462,7 +497,8 @@ async function store(mode, work) {
 function rowSummary(entry) {
   try {
     const s = JSON.parse(entry.json);
-    const parts = [`χ²/N ${s.chi2_per_N.toFixed(2)}`];
+    const kind = { single: '한 줄 관', step: '굵기 변화', loop: '합류 관', y: 'Y자' }[s.topology];
+    const parts = [...(kind ? [kind] : []), `χ²/N ${s.chi2_per_N.toFixed(2)}`];
     const pieces = (s.thickness && s.thickness.pieces) || [];
     const sizes = pieces.filter(p => p.d_mm !== undefined).map(p => p.d_mm.toFixed(2));
     if (sizes.length) parts.push(`내경 ${sizes.join(', ')} mm`);

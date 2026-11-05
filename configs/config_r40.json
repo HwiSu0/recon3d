@@ -23,5 +23,6 @@
   "out": "결과/recon_run40",
   "box_outer": {"a": [0, 10], "b": [0, 10], "c": [8.5, 19.5]},
   "hose_mm": {"stem": 3, "branches": [3]},
-  "flow_mL_s": [0.21]
+  "flow_mL_s": [0.21],
+  "topology": "single"
 }

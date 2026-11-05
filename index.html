@@ -77,14 +77,32 @@
         <tbody></tbody>
       </table>
 
-      <h2>입구와 출구 <small>cm, 내경 mm, 유량 mL/s</small></h2>
+      <h2>입구와 출구 <small>cm, 유량 mL/s</small></h2>
       <table id="portTable">
-        <thead><tr><th scope="col"></th><th scope="col">a</th><th scope="col">b</th><th scope="col">c</th><th scope="col">내경</th><th scope="col">유량</th><th scope="col"><span class="sr">삭제</span></th></tr></thead>
+        <thead><tr><th scope="col"></th><th scope="col">a</th><th scope="col">b</th><th scope="col">c</th><th scope="col">유량</th><th scope="col"><span class="sr">삭제</span></th></tr></thead>
         <tbody></tbody>
       </table>
       <button type="button" class="text" id="addOutlet">출구 추가</button>
 
       <div class="fields">
+        <label>구조
+          <select id="fTopo">
+            <option value="auto">자동 선택</option>
+            <option value="single">한 줄 관</option>
+            <option value="step">굵기 변화</option>
+            <option value="loop">합류 관</option>
+            <option value="y">Y자</option>
+          </select>
+        </label>
+        <label>출구
+          <select id="fExit"></select>
+        </label>
+        <label>입구 쪽 내경 (mm)
+          <input type="number" id="fStem" step="any" min="0">
+        </label>
+        <label>뒤쪽, 갈래 내경 (mm)
+          <input type="text" id="fBranches" autocomplete="off">
+        </label>
         <label>입구 앞 호스 (cm)
           <input type="number" id="fUp" step="any" min="0">
         </label>

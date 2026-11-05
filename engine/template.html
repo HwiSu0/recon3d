@@ -121,7 +121,8 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 const f1 = x => (Math.round(x * 10) / 10).toFixed(1);
 const fp = p => `(${p.map(f1).join(', ')})`;
 const G = D.geom || {};
-const S = D.summary, nb = S.U.length, names = D.outlet_names || [];
+const S = D.summary, nb = S.U.length, LOOP = D.topology === 'loop', STEP = D.topology === 'step';
+const names = LOOP ? ['갈래1', '갈래2'] : (D.outlet_names || []);
 const hoseMM = G.hose_mm || { stem: 3, branches: Array(nb).fill(3) };
 document.getElementById('title').textContent = D.title;
 
@@ -131,10 +132,15 @@ const estD = S.lam.map(l => (S.lam0 > 1e-6 && l > 0) ? hoseMM.stem * Math.sqrt(l
 // ---------- summary ----------
 const rows = [];
 rows.push(['χ²/N', `${S.chi2_per_N.toFixed(2)} <span class="meta">(철 없음 ${S.chi2_per_N_no_iron_model.toFixed(2)})</span>`]);
-if (S.J) rows.push(['분기점', fp(S.J)]);
+if (S.topology_compare) rows.push(['구조', S.topology_compare.map((r, i) => `${i === 0 ? '<b>' : ''}${r.name}: χ²/N ${r.chi2_per_N.toFixed(2)}, BIC ${r.bic.toFixed(0)}${i === 0 ? '</b>' : ''}`).join('<br>')]);
+if (S.topology_compare && S.chi2_per_N > 2) rows.push(['주의', `<span class="bad">χ²/N이 커서 구조 선택을 믿기 어려움</span>`]);
+if (S.J) rows.push([LOOP ? '분기점 J1' : '분기점', fp(S.J)]);
+if (S.J2) rows.push(['합류점 J2', fp(S.J2)]);
+if (STEP && S.P) { rows.push(['굵기 바뀌는 점 P', fp(S.P)]); rows.push(['입구→P', `${f1(S.step_s_cm)} cm`]); }
 S.C.forEach((c, k) => rows.push([`꺾임 ${names[k] || k + 1}`, fp(c)]));
 if (nb >= 2) rows.push(['입구→분기점', `${f1(S.stem_len_cm)} cm`]);
 S.branch_len_cm.forEach((L, k) => rows.push([`길이 ${names[k] || k + 1}`, `${f1(L)} cm`]));
+if (S.merge_len_cm !== undefined) rows.push(['합류점→출구', `${f1(S.merge_len_cm)} cm`]);
 rows.push(['속도 입구 쪽', `${S.U0.toFixed(2)} cm/s`]);
 S.U.forEach((u, k) => rows.push([`속도 ${names[k] || k + 1}`, `${u.toFixed(2)} cm/s`]));
 rows.push(['입구 도착', `${S.t0.toFixed(1)} s`]);
@@ -144,16 +150,20 @@ if (S.truth_error_cm) {
   const lab = nb >= 2 ? ['입구→분기점', ...names] : [names[0] || '통로'];
   S.truth_error_cm.forEach((e, i) => rows.push([`경로 오차 ${lab[i] || i}`, `평균 ${e.mean.toFixed(2)}, 최대 ${e.max.toFixed(2)} cm`]));
 }
+if (S.truth_point_error_cm) Object.entries(S.truth_point_error_cm).forEach(([k, v]) => rows.push([`점 오차 ${k}`, `${v.toFixed(2)} cm`]));
 if (S.chi2_per_N_truth_path) rows.push(['χ²/N 실제 경로', S.chi2_per_N_truth_path.toFixed(2)]);
 document.getElementById('sum').innerHTML = rows.map(r => `<tr><td>${r[0]}</td><td class="num">${r[1]}</td></tr>`).join('');
 // ---------- legend ----------
 const brCol = ['--b1', '--b2', '--b3'];
 const lg = [];
-if (nb >= 2) lg.push(['--stem', '입구→분기점']);
-for (let k = 0; k < nb; k++) lg.push([nb >= 2 ? brCol[k % 3] : '--b1', names[k] || `갈래${k + 1}`]);
+if (STEP) { lg.push(['--b1', '굵기 바뀌기 전']); lg.push(['--b2', '굵기 바뀐 뒤']); }
+else {
+  if (nb >= 2) lg.push(['--stem', LOOP ? '입구 쪽, 합류 뒤' : '입구→분기점']);
+  for (let k = 0; k < nb; k++) lg.push([nb >= 2 ? brCol[k % 3] : '--b1', names[k] || `갈래${k + 1}`]);
+}
 if (D.truth) lg.push(['--truth', '실제 경로']);
 document.getElementById('legend').innerHTML = lg.map(([c, t]) => `<span><i class="sw" style="background:var(${c})"></i>${t}</span>`).join('');
-if (nb < 2) document.querySelector('[data-f="J"]').textContent = '꺾임';
+if (nb < 2) document.querySelector('[data-f="J"]').textContent = STEP ? 'P' : '꺾임';
 
 // ---------- vector helpers ----------
 const V3 = {
@@ -355,7 +365,7 @@ function start3D() {
 
   // 아크릴 상자 (벽 6장 + 구멍)
   const holeR = (G.hole_mm || 6.5) / 20;
-  const holesW = [D.inlet, ...D.outlets].map(p => W(p));
+  const holesW = [D.inlet, ...(D.all_outlets || D.outlets)].map(p => W(p));
   const faces = [
     { k: 0, k0: lo[0], k1: lo[0] + wT }, { k: 0, k0: hi[0] - wT, k1: hi[0] },
     { k: 1, k0: lo[1], k1: lo[1] + wT }, { k: 1, k0: hi[1] - wT, k1: hi[1] },
@@ -385,12 +395,20 @@ function start3D() {
   const IDs = hoseMM.stem / 20, wallH = (G.hose_wall_mm || 1) / 10;
   const rIn = d => d / 20, rOut = d => d / 20 + wallH;
   const upD = Wd(G.up_dir || [-1, 0, 0]), outD = Wd(G.out_dir || [1, 0, 0]), Lout = G.outlet_len || 18;
-  const pieceCol = i => nb >= 2 ? (i === 0 ? [0.80, 0.80, 0.84] : cssRGB(brCol[(i - 1) % 3])) : cssRGB('--b1');
+  const pieceCol = i => STEP ? cssRGB(i === 0 ? '--b1' : '--b2') : nb >= 2 ? ((i === 0 || (LOOP && i === 3)) ? [0.80, 0.80, 0.84] : cssRGB(brCol[(i - 1) % 3])) : cssRGB('--b1');
   const best = D.best.map(pl => pl.map(W));
   const inletW = W(D.inlet), outsW = D.outlets.map(W);
   function hosePieces(paths) {        // 각 조각: {pts, d}
     const out = [];
-    if (nb === 1) {
+    if (STEP) {
+      out.push({ nodes: [V3.add(inletW, V3.mul(upD, 8)), ...paths[0]], d: hoseMM.stem, i: 0 });
+      const l2 = paths[1]; out.push({ nodes: [...l2, V3.add(l2[l2.length - 1], V3.mul(outD, Lout))], d: hoseMM.branches[0] || hoseMM.stem, i: 1 });
+    } else if (LOOP) {
+      const mg = paths[3];
+      out.push({ nodes: [V3.add(inletW, V3.mul(upD, 8)), ...paths[0]], d: hoseMM.stem, i: 0 });
+      for (let k = 0; k < 2; k++) out.push({ nodes: paths[k + 1], d: hoseMM.branches[k] || hoseMM.stem, i: k + 1 });
+      out.push({ nodes: [...mg, V3.add(mg[mg.length - 1], V3.mul(outD, Lout))], d: hoseMM.stem, i: 3 });
+    } else if (nb === 1) {
       const nodes = [V3.add(inletW, V3.mul(upD, 8)), ...paths[0], V3.add(paths[0][paths[0].length - 1], V3.mul(outD, Lout))];
       out.push({ nodes, d: hoseMM.stem, i: 1 });
     } else {
@@ -407,13 +425,17 @@ function start3D() {
   // 분기점: Y자 연결관 + 강조
   if (nb >= 2) {
     const J = best[0][best[0].length - 1]; const rS = rOut(hoseMM.stem);
-    const dirs = [V3.norm(V3.sub(best[0][best[0].length - 2], J)), ...best.slice(1).map(pl => V3.norm(V3.sub(pl[1], J)))];
-    addMesh(sphere(J, rS * 1.55, 24), { col: [0.94, 0.94, 0.92], spec: 0.5, shin: 60 }, 'hose');
-    dirs.forEach((d, i) => addMesh(cyl(J, V3.add(J, V3.mul(d, 0.9)), rS * 1.3, rS * 1.3, 28, true), { col: [0.94, 0.94, 0.92], spec: 0.5, shin: 60 }, 'hose'));
-    const halo = addMesh(sphere(J, 0.7, 28), { col: [1.0, 0.72, 0.18], alpha: 0.18, fres: 0.5, spec: 0.2, shin: 20, transparent: true, pulse: true }, 'hose');
-    addLabel(J, `분기점 J`, '#d97706', true);
+    const brs = LOOP ? [best[1], best[2]] : best.slice(1);
+    const yfit = (P0, dirs, label) => {
+      addMesh(sphere(P0, rS * 1.55, 24), { col: [0.94, 0.94, 0.92], spec: 0.5, shin: 60 }, 'hose');
+      dirs.forEach(d => addMesh(cyl(P0, V3.add(P0, V3.mul(d, 0.9)), rS * 1.3, rS * 1.3, 28, true), { col: [0.94, 0.94, 0.92], spec: 0.5, shin: 60 }, 'hose'));
+      addMesh(sphere(P0, 0.7, 28), { col: [1.0, 0.72, 0.18], alpha: 0.18, fres: 0.5, spec: 0.2, shin: 20, transparent: true, pulse: true }, 'hose');
+      addLabel(P0, label, null, true);
+    };
+    yfit(J, [V3.norm(V3.sub(best[0][best[0].length - 2], J)), ...brs.map(pl => V3.norm(V3.sub(pl[1], J)))], LOOP ? 'J1' : 'J');
+    if (LOOP) { const J2 = best[3][0]; yfit(J2, [V3.norm(V3.sub(best[3][1], J2)), ...brs.map(pl => V3.norm(V3.sub(pl[pl.length - 2], J2)))], 'J2'); }
     // 굵기가 바뀌는 곳: 이음관(리듀서)
-    best.slice(1).forEach((pl, k) => {
+    brs.forEach((pl, k) => {
       const dB = hoseMM.branches[k] || hoseMM.stem; const dir = V3.norm(V3.sub(pl[1], J));
       const est = estD[k];
       if (Math.abs(dB - hoseMM.stem) > 0.01) {
@@ -424,9 +446,20 @@ function start3D() {
       }
     });
   }
+  // 굵기 바뀌는 점
+  if (STEP) {
+    const P0 = best[0][best[0].length - 1], dirA = V3.norm(V3.sub(P0, best[0][best[0].length - 2])), dB = hoseMM.branches[0] || hoseMM.stem;
+    addMesh(cyl(V3.sub(P0, V3.mul(dirA, 0.45)), V3.add(P0, V3.mul(dirA, 0.45)), rOut(hoseMM.stem) * 1.15, rOut(dB) * 1.15, 32, true), { col: [0.95, 0.70, 0.20], spec: 0.6, shin: 50 }, 'hose');
+    addMesh(sphere(P0, 0.7, 28), { col: [1.0, 0.72, 0.18], alpha: 0.18, fres: 0.5, spec: 0.2, shin: 20, transparent: true, pulse: true }, 'hose');
+    addLabel(P0, `P ${hoseMM.stem}→${dB} mm`, null, true);
+    const Cw = W(S.C[0]); addMesh(torus(Cw, V3.norm(V3.sub(W(D.outlets[0]), inletW)), rOut(dB) * 1.7, 0.05, 40, 8), { col: [0.6, 0.6, 0.65], spec: 0.4, shin: 30 }, 'hose');
+    if (V3.len(V3.sub(Cw, P0)) > 1) addLabel(Cw, 'C', css('--muted'), false);
+  }
   // 꺾이는 점 표시 링
   best.forEach((pl, i) => {
+    if (STEP) return;
     if (nb >= 2 && i === 0) return;
+    if (LOOP && i === 3) return;
     const k = nb >= 2 ? i - 1 : 0; const C = pl[1]; const d = V3.norm(V3.sub(pl[2], pl[0]));
     const dd = nb >= 2 ? (hoseMM.branches[k] || hoseMM.stem) : hoseMM.stem;
     addMesh(torus(C, d, rOut(dd) * 1.7, 0.05, 40, 8), { col: pieceCol(i), spec: 0.4, shin: 30 }, 'hose');
@@ -441,7 +474,9 @@ function start3D() {
   D.alt.forEach(set => set.forEach((pl, i) => addMesh(tube(smooth(pl.map(W), 0.6, 0.2), 0.07, 10, true), { col: pieceCol(i), alpha: 0.35, transparent: true, spec: 0.2 }, 'alt')));
   // 구멍 이름
   addLabel(inletW, '입구', null, false);
-  outsW.forEach((o, k) => addLabel(V3.add(o, V3.mul(outD, 1.5)), names[k] || `출구${k + 1}`, null, false));
+  outsW.forEach((o, k) => addLabel(V3.add(o, V3.mul(outD, 1.5)), (D.outlet_names || [])[k] || `출구${k + 1}`, null, false));
+  (D.all_outlets || []).forEach((o, k) => { if (D.outlets.some(u => Math.hypot(u[0] - o[0], u[1] - o[1], u[2] - o[2]) < 0.01)) return;
+    addLabel(V3.add(W(o), V3.mul(outD, 1.5)), `${(D.all_outlet_names || [])[k] || '출구' + (k + 1)} (안 씀)`, css('--muted'), false); });
   // 센서
   Object.entries(D.sensors).forEach(([k, p]) => {
     const c = W(p);
@@ -526,7 +561,7 @@ function start3D() {
   stage.addEventListener('pointerup', up_); stage.addEventListener('pointercancel', up_);
   stage.addEventListener('wheel', e => { e.preventDefault(); dist = Math.min(diag * 8, Math.max(diag * 0.1, dist * Math.exp(e.deltaY * 0.0012))); mark(); }, { passive: false });
   document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { [yaw, pitch] = VIEWS[b.dataset.v]; target = center.slice(); dist = diag * 1.9; mark(); });
-  const focus = { J: nb >= 2 ? best[0][best[0].length - 1] : best[0][1], in: inletW, out: V3.mul(V3.add(outsW[0], outsW[outsW.length - 1]), 0.5) };
+  const focus = { J: (nb >= 2 || STEP) ? best[0][best[0].length - 1] : best[0][1], in: inletW, out: V3.mul(V3.add(outsW[0], outsW[outsW.length - 1]), 0.5) };
   const fview = { J: [0.75, 0.5, 9], in: [-0.9, 0.25, 6], out: [1.1, 0.3, outsW.length > 1 ? 11 : 6] };
   document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { const f = b.dataset.f; target = focus[f].slice(); [yaw, pitch, dist] = fview[f]; mark(); });
   const tg = (id, key) => document.getElementById(id).onchange = e => { show[key] = e.target.checked; mark(); };

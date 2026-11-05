@@ -144,9 +144,8 @@ th:last-child, td:last-child { padding-right: 0; }
 td input[type="text"], td input[type="number"] { height: 26px; padding: 0 4px; }
 #sensorTable td:first-child { width: 22px; }
 #sensorTable td:nth-child(2) { width: 72px; }
-#portTable td:first-child { min-width: 60px; }
-#portTable td:nth-child(5) { width: 50px; }
-#portTable td:nth-child(6) { width: 62px; }
+#portTable td:first-child { min-width: 84px; }
+#portTable td:nth-child(5) { width: 66px; }
 #portTable td:last-child { width: 20px; text-align: right; }
 .del { width: 18px; height: 26px; padding: 0; border: 0; color: var(--mute); }
 

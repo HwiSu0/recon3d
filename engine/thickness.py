@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-thickness.py - 앞머리 속도와 유량으로 호스 안지름을 추정한다.
+thickness.py - 앞머리 속도와 유량으로 호스 내경을 추정한다.
 
 자기장만으로는 lambda = (실효 자화율 x 단면적)만 정해지고, 호스가 센서에서 충분히 멀어
 굵기 자체는 보이지 않는다. 그래서 두 방법을 쓴다.
 
 1) 유량법: d = 2 sqrt(Q / (pi U))
    U는 Capstone 측정값에서 구한 앞머리 속도, Q는 출구에서 모은 양 / 걸린 시간.
-2) 신호 크기 비교 (갈래가 있을 때, 농도가 같다고 가정): d_k = d_stem sqrt(lam_k / lam_stem)
+2) 신호 크기 비교 (농도가 같다고 가정): d_k = d_입구 sqrt(lam_k / lam_입구)
 
+복원에서 고른 구조(한 줄 관, 굵기 변화, Y자, 합류 관)의 경로를 고정하고 구간마다 속도를 구한다.
 속도는 첫 앞머리가 상자를 지나는 구간만 맞춘다. 그 뒤의 신호에는 뒤따르는 덩어리와
 호스에 남은 철이 섞여 있어 단일 앞머리 모델로 설명되지 않기 때문이다.
 속도를 바꿔 가며 chi2가 어떻게 변하는지(프로파일) 보고, 최솟값이 뚜렷하지 않으면
@@ -25,28 +26,44 @@ FLOW_REL_ERR = 0.05      # 유량 측정의 상대 불확도(눈금 읽기와 �
 
 
 class FrontModel:
-    """경로를 고정한 앞머리 모델. recon3d.Model.predict와 같은 식이고 쌍극자 계수만 미리 계산한다.
-    매개변수: nb=1 [t0, U, lam, tau] / nb>=2 [t0, U0, U1.., lam0, lam1.., tau]"""
+    """경로를 고정한 앞머리 모델. recon3d의 Model, ModelStep, ModelLoop.predict와 같은 식이고
+    쌍극자 계수만 미리 계산한다. 매개변수: [t0, U 구간별.., lam 구간별.., tau]"""
 
     def __init__(self, model, nodes):
         self.g = g = model.g
-        self.nb = model.nb
+        self.kind = model.kind
+        self.oi = getattr(model, 'oi', 0)
+        self.oa = getattr(model, 'oa', True)
         P = model.paths(nodes)
         pts, self.stem_s, self.LJ = P['stem']
         self.stem_G = g.unit_field(pts) if len(pts) else None
         self.br = [(g.unit_field(p) if len(p) else None, s, L) for p, s, L in P['br']]
-        self.lengths = [self.LJ] + [b[2] for b in self.br]
-        self.n_speed = 1 if self.nb == 1 else self.nb + 1
+        if self.kind == 'step':
+            G, s, L = self.br[0]
+            self.sP = float(nodes['sf'] * L)
+            self.L = L
+            m = s < self.sP
+            self.before = ({k: v[m] for k, v in G.items()}, s[m])
+            self.after = ({k: v[~m] for k, v in G.items()}, s[~m])
+            self.lengths = [self.sP, L - self.sP]
+            self.reach = [self.sP, L]
+        elif self.kind == 'single':
+            self.lengths = [self.br[0][2]]
+            self.reach = [self.br[0][2]]
+        else:
+            self.lengths = [self.LJ] + [b[2] for b in self.br]
+            self.reach = [self.LJ] + [self.LJ + b[2] for b in self.br]
+        if self.kind == 'loop':
+            mp, self.merge_s, self.LM = P['merge']
+            self.merge_G = g.unit_field(mp) if len(mp) else None
+        self.n = len(self.lengths)
 
     def split(self, q):
-        if self.nb == 1:
-            t0, U, lam, tau = q
-            return t0, U, [U], lam, [lam], tau
-        nb = self.nb
-        return q[0], q[1], list(q[2:2 + nb]), q[2 + nb], list(q[3 + nb:3 + 2 * nb]), q[3 + 2 * nb]
+        n = self.n
+        return q[0], list(q[1:1 + n]), list(q[1 + n:1 + 2 * n]), q[1 + 2 * n]
 
     def predict(self, q, tt):
-        t0, U0, Us, lam0, lams, tau = self.split(q)
+        t0, Us, lams, tau = self.split(q)
         g = self.g
         out = {k: np.zeros((len(tt), 3)) for k in g.sensors}
         sig = lambda x: 0.5 * (1 + np.tanh(x / (2 * tau)))
@@ -55,21 +72,44 @@ class FrontModel:
             L = lam * sig(tt[:, None] - tarr[None])
             for k in out:
                 out[k] += L @ G[k]
+        U0, lam0 = Us[0], lams[0]
         add(g.up_G, t0 + g.up_s / U0, lam0)
+        so = g.out_pts[self.oi][1]
+        if self.kind == 'single':
+            G, s, L = self.br[0]
+            add(G, t0 + s / U0, lam0)
+            add(g.out_G[self.oi], t0 + (L + so) / U0, lam0)
+            return out
+        if self.kind == 'step':
+            tP = t0 + self.sP / U0
+            add(self.before[0], t0 + self.before[1] / U0, lam0)
+            add(self.after[0], tP + (self.after[1] - self.sP) / Us[1], lams[1])
+            add(g.out_G[self.oi], tP + (self.L - self.sP + so) / Us[1], lams[1] if self.oa else lam0)
+            return out
         if self.stem_G is not None:
             add(self.stem_G, t0 + self.stem_s / U0, lam0)
         tJ = t0 + self.LJ / U0
+        if self.kind == 'loop':
+            arrive = []
+            for k, (G, s, Lb) in enumerate(self.br):
+                if G is not None:
+                    add(G, tJ + s / Us[k + 1], lams[k + 1])
+                arrive.append(tJ + Lb / Us[k + 1])
+            tJ2 = min(arrive)
+            if self.merge_G is not None:
+                add(self.merge_G, tJ2 + self.merge_s / U0, lam0)
+            add(g.out_G[self.oi], tJ2 + (self.LM + so) / U0, lam0)
+            return out
         for k, (G, s, Lb) in enumerate(self.br):
             if G is not None:
-                add(G, tJ + s / Us[k], lams[k])
-            add(g.out_G[k], tJ + (Lb + g.out_pts[k][1]) / Us[k], lams[k])
+                add(G, tJ + s / Us[k + 1], lams[k + 1])
+            add(g.out_G[k], tJ + (Lb + g.out_pts[k][1]) / Us[k + 1], lams[k + 1])
         return out
 
     def bounds(self):
-        ns = self.n_speed
-        nl = 1 if self.nb == 1 else self.nb + 1
-        lo = [-60.0] + [SPEED_GRID[0] * 0.5] * ns + [0.0] * nl + [0.1]
-        hi = [400.0] + [SPEED_GRID[-1] * 2] * ns + [5.0] * nl + [15.0]
+        n = self.n
+        lo = [-60.0] + [SPEED_GRID[0] * 0.5] * n + [0.0] * n + [0.1]
+        hi = [400.0] + [SPEED_GRID[-1] * 2] * n + [5.0] * n + [15.0]
         return np.array(lo), np.array(hi)
 
 
@@ -133,13 +173,13 @@ class Fitter:
         return z, 2 * s.cost, s
 
     def start(self, u):
-        fr = self.front
-        tail = [u] * fr.n_speed + [0.1] * (1 if fr.nb == 1 else fr.nb + 1) + [1.0]
+        n = self.front.n
+        tail = [u] * n + [0.1] * n + [1.0]
         return [[t] + tail for t in (self.t_on - 6, self.t_on - 2, self.t_on + 1)]
 
     def best_at_common_speed(self, u):
         best = None
-        fixed = {1 + i: u for i in range(self.front.n_speed)}
+        fixed = {1 + i: u for i in range(self.front.n)}
         for x0 in self.start(u):
             x, c, _ = self.fit(x0, fixed)
             if best is None or c < best[1]:
@@ -164,7 +204,7 @@ class Fitter:
         return np.array([cur[j][1] for j in range(len(SPEED_GRID))])
 
 
-def refine(fitter, x, c, idx):
+def refine(fitter, x, idx):
     """chi2 최소 근처를 촘촘히 재서 포물선으로 속도와 곡률을 구한다. 곡률은 log U 기준."""
     u0 = x[idx]
     us = u0 * np.exp(np.array([-0.3, -0.15, 0.0, 0.15, 0.3]))
@@ -182,56 +222,59 @@ def fit_window(cfg, front, tt, data, t_on, a, b):
     return fitter, fitter.best_overall()
 
 
-def piece_names(cfg, nb):
-    names = cfg.get('outlet_names') or [f'출구{i + 1}' for i in range(nb)]
-    return ['통로'] if nb == 1 else ['입구 쪽'] + list(names)
-
-
 def nodes_from(cfg, model, best_nodes):
     """실제 경로를 알면 그것을, 아니면 복원한 경로를 쓴다."""
     truth = cfg.get('truth')
     if truth:
         g = R.geom_from_truth(model, truth)
         if g is not None:
-            if model.nb == 1:
+            if model.kind == 'single':
                 return {'C': [g[:3]]}, '실제 경로'
+            if model.kind == 'loop':
+                return {'J': g[:3], 'J2': g[3:6], 'C': [g[6:9], g[9:12]]}, '실제 경로'
             return {'J': g[:3], 'C': [g[3 + 3 * k:6 + 3 * k] for k in range(model.nb)]}, '실제 경로'
     return best_nodes, '복원 경로'
 
 
+def piece_info(cfg, model, n):
+    """구간 이름, 구간마다 흐르는 유량, 설정의 내경"""
+    nb = len(cfg['outlets'])
+    hose = cfg.get('hose_mm') or {'stem': 3, 'branches': []}
+    stem = hose['stem']
+    br = list(hose.get('branches') or [])
+    br += [stem] * max(0, n - len(br))
+    flows = [float(q) if q not in (None, '') else None for q in (cfg.get('flow_mL_s') or [])] + [None] * nb
+    if model.kind == 'single':
+        return ['통로'], [flows[0]], [stem]
+    if model.kind == 'step':
+        return ['굵기 바뀌기 전', '굵기 바뀐 뒤'], [flows[0], flows[0]], [stem, br[0]]
+    if model.kind == 'loop':
+        return ['입구 쪽', '갈래1', '갈래2'], [flows[0], None, None], [stem, br[0], br[1]]
+    names = list(cfg.get('outlet_names') or [f'출구{i + 1}' for i in range(nb)])
+    each = flows[:nb]
+    total = sum(each) if all(q is not None for q in each) else None
+    return ['입구 쪽'] + names, [total] + each, [stem] + br[:nb]
+
+
 def estimate(cfg, tt, data, I, model, best_nodes):
-    nb = model.nb
     nodes, path_kind = nodes_from(cfg, model, best_nodes)
     front = FrontModel(model, nodes)
     t_on = onset(tt, data)
     start = max(float(tt[0]), t_on - 12)
-    box_len = sum(front.lengths[:1]) + max(front.lengths[1:])
+    last = float(tt[-1])
+    n = front.n
+    box_len = max(front.reach)
 
     # 1) 넓은 창으로 속도의 크기를 잡고, 앞머리가 상자를 지나는 시간만큼 창을 정한다
     fitter, (x, c, _) = fit_window(cfg, front, tt, data, t_on, start, t_on + 12)
-    speeds = x[1:1 + front.n_speed]
-    typical = float(np.median(speeds))
-    span = float(np.clip(1.2 * box_len / typical + 3, 6, 40))
-    span = min(span, float(tt[-1]) - t_on)
+    typical = float(np.median(x[1:1 + n]))
+    span = min(float(np.clip(1.2 * box_len / typical + 3, 6, 40)), last - t_on)
     end = t_on + span
 
-    # 2) 그 창에서 속도마다 프로파일을 구한다
+    # 2) 그 창에서 다시 맞춘다
     fitter, (x, c, s) = fit_window(cfg, front, tt, data, t_on, start, end)
     infl = residual_inflation(s.fun, fitter.axes)
-    n_lam = 1 if nb == 1 else nb + 1
-    pieces = []
-    names = piece_names(cfg, nb)
-    flows = cfg.get('flow_mL_s') or []
-    flows = [float(q) if q not in (None, '') else None for q in flows] + [None] * nb
-    hose = cfg.get('hose_mm') or {'stem': 3, 'branches': [3] * nb}
-    if nb == 1:
-        Qs = [flows[0]]; dset = [hose['branches'][0] if hose.get('branches') else hose['stem']]
-    else:
-        q_all = flows[:nb]
-        Qs = [sum(q_all) if all(q is not None for q in q_all) else None] + q_all
-        dset = [hose['stem']] + list(hose['branches'])[:nb]
-
-    last = float(tt[-1])
+    names, Qs, dset = piece_info(cfg, model, n)
     windows = {}
 
     def at_window(length):
@@ -244,18 +287,18 @@ def estimate(cfg, tt, data, I, model, best_nodes):
             windows[key] = (ft, xw, cw, residual_inflation(sw.fun, ft.axes))
         return windows[key]
 
-    for i in range(front.n_speed):
+    pieces = []
+    for i in range(n):
         idx = 1 + i
-        # 3) 구간마다 앞머리가 지나는 데 걸리는 시간만큼 창을 잡는다 (느린 갈래는 더 길게)
-        reach = sum(front.lengths[:1]) + (front.lengths[i] if i else 0) if nb > 1 else front.lengths[1]
-        own = float(np.clip(1.2 * reach / x[idx] + 3, 6, 40))
+        # 3) 구간마다 앞머리가 지나는 데 걸리는 시간만큼 창을 잡는다 (느린 구간은 더 길게)
+        own = float(np.clip(1.2 * front.reach[i] / x[idx] + 3, 6, 40))
         own = min(own, last - t_on)
         ft, xi, ci, inf_i = (fitter, x, c, infl) if own <= span * 1.3 else at_window(own)
         used = span if ft is fitter else own
 
         prof = ft.profile(xi, idx)
         dchi = (prof - prof.min()) / inf_i
-        U, curv = refine(ft, xi, ci, idx)
+        U, curv = refine(ft, xi, idx)
         logu = np.log(SPEED_GRID)
         half = float(np.interp(math.log(U / 2), logu, dchi)); dbl = float(np.interp(math.log(U * 2), logu, dchi))
         resolved = bool(curv and min(half, dbl) >= RESOLVE_SIGMA ** 2 and SPEED_GRID[0] * 1.2 < U < SPEED_GRID[-1] / 1.2)
@@ -267,7 +310,7 @@ def estimate(cfg, tt, data, I, model, best_nodes):
                 if used * k > 3 and t_on + used * k <= last:
                     spread = max(spread, abs(math.log(at_window(used * k)[1][idx] / U)))
         rel = math.hypot(stat, spread) if stat is not None else None
-        piece = {'name': names[i], 'U': round(U, 3), 'resolved': resolved, 'L_cm': round(float(front.lengths[i] if nb > 1 else front.lengths[1]), 2),
+        piece = {'name': names[i], 'U': round(U, 3), 'resolved': resolved, 'L_cm': round(float(front.lengths[i]), 2),
                  'profile': {'U': [round(float(u), 3) for u in SPEED_GRID], 'dchi2': [round(float(v), 2) for v in dchi]},
                  'd_set_mm': dset[i], 'Q_mL_s': Qs[i]}
         if resolved:
@@ -279,22 +322,23 @@ def estimate(cfg, tt, data, I, model, best_nodes):
                 piece['d_err_mm'] = round(d * 0.5 * math.hypot(rel, FLOW_REL_ERR), 2)
         pieces.append(piece)
 
-    # 4) 갈래가 있으면 신호 크기 비로도 굵기를 낸다
-    lam = x[1 + front.n_speed:1 + front.n_speed + n_lam]
+    # 4) 구간이 나뉘면 신호 크기 비로도 굵기를 낸다
+    lam = x[1 + n:1 + 2 * n]
     lam_err = None
     try:
+        free = list(range(len(x)))
         J = s.jac
         cov = np.linalg.inv(J.T @ J) * infl
-        lam_err = np.sqrt(np.diag(cov))[1 + front.n_speed:1 + front.n_speed + n_lam]
+        lam_err = np.sqrt(np.diag(cov))[1 + n:1 + 2 * n]
     except (np.linalg.LinAlgError, ValueError, IndexError):
         pass
     ratio = []
-    if nb >= 2 and lam_err is not None:
-        for k in range(nb):
-            rel = math.hypot(lam_err[k + 1] / max(lam[k + 1], 1e-9), lam_err[0] / max(lam[0], 1e-9))
-            item = {'name': names[k + 1], 'resolved': bool(rel < 0.4)}
+    if n >= 2 and lam_err is not None:
+        for k in range(1, n):
+            rel = math.hypot(lam_err[k] / max(lam[k], 1e-9), lam_err[0] / max(lam[0], 1e-9))
+            item = {'name': names[k], 'resolved': bool(rel < 0.4)}
             if item['resolved']:
-                d = hose['stem'] * math.sqrt(lam[k + 1] / lam[0])
+                d = dset[0] * math.sqrt(lam[k] / lam[0])
                 item['d_mm'] = round(float(d), 2); item['d_err_mm'] = round(float(d * rel / 2), 2)
             ratio.append(item)
 
