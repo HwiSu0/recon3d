@@ -135,6 +135,7 @@ rows.push(['χ²/N', `${S.chi2_per_N.toFixed(2)} <span class="meta">(철 없음 
 if (S.fit_window) rows.push(['맞춘 구간', `${S.fit_window[0]}~${S.fit_window[1]} s`]);
 if (S.topology_compare) rows.push(['구조', S.topology_compare.map((r, i) => `${i === 0 ? '<b>' : ''}${r.name}${r.flat ? ' (굵기 변화 없음)' : ''}: χ²/N ${r.rough ? '약 ' : ''}${r.chi2_per_N.toFixed(2)}, BIC ${r.bic.toFixed(0)}${i === 0 ? '</b>' : ''}`).join('<br>')]);
 if (S.topology_compare && S.chi2_per_N > 2) rows.push(['주의', `<span class="bad">χ²/N이 커서 구조 선택을 믿기 어려움</span>`]);
+if (S.at_limit) rows.push(['주의', `<span class="bad">속도나 앞머리 폭이 탐색 범위 끝에 걸림. 앞머리가 지나가는 신호가 아닐 수 있음</span>`]);
 const ranked = (S.topology_compare || []).filter(r => !r.flat);
 if (ranked.length > 1 && ranked[1].bic - ranked[0].bic < 10) rows.push(['주의', `<span class="bad">앞선 두 후보의 BIC 차이가 10보다 작아 구조를 정할 수 없음</span>`]);
 if (S.J) rows.push([LOOP ? '분기점 J1' : '분기점', fp(S.J)]);

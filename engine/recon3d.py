@@ -620,6 +620,9 @@ class Context:
         # 출구 고르기: "exit": "auto"(출구마다 다 맞춰 보고 고름) 또는 출구 번호(0부터)
         exit_sel = cfg.get('exit', 'auto' if (nb >= 2 and topo != 'y') else 0)
         one = cfg.get('candidates', ['single', 'step', 'loop']) if topo == 'auto' else ([topo] if topo != 'y' else [])
+        hm = cfg.get('hose_mm') or {}
+        if topo == 'auto' and hm.get('branches') and all(abs(d - hm.get('stem', 3)) < 1e-6 for d in hm['branches']):
+            one = [k for k in one if k != 'step']      # 호스 굵기가 모두 같으면 굵기 변화 관은 후보가 아니다
         exits = list(range(nb)) if exit_sel == 'auto' else [int(exit_sel)]
         cands = [(k, [i]) for i in exits for k in one]
         if topo == 'y' or (topo == 'auto' and nb >= 2 and cfg.get('try_y', True)): cands.append(('y', list(range(nb))))
@@ -915,6 +918,8 @@ def finish(ctx, results, sols):
     summ = summarize(model, sols[0], N); summ['chi2_per_N_no_iron_model'] = z
     summ['noise_uT'] = {k: round(float(d['noise']), 3) for k, d in data.items()}
     summ['fit_window'] = [round(float(v), 1) for v in ctx.win]
+    pb = model.unpack(sols[0].x)
+    summ['at_limit'] = bool(pb['U0'] > 29 or pb['tau'] < 0.12)      # 앞머리가 지나가는 신호로 보기 어려운 답
     summ['alternatives'] = [summarize(model, s, N) for s in sols[1:4]]
     if len(results) > 1:
         summ['topology_scale'] = round(float(results[0]['scale']), 2)
