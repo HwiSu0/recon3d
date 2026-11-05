@@ -342,8 +342,8 @@ function wireFields() {
   });
 }
 
-/* Run #55부터 S1과 S3 센서를 서로 바꿔 놓았다. Run 번호에 맞게 ID를 바로잡는다 */
-const SWAP_RUN = 55;
+/* Run #56부터 S1과 S3 센서를 서로 바꿔 놓았다. Run 번호에 맞게 ID를 바로잡는다 */
+const SWAP_RUN = 56;
 function matchSensors(cfg) {
   const ids = cfg.ids;
   if (!ids) return false;
@@ -651,7 +651,7 @@ async function store(mode, work) {
 function rowSummary(entry) {
   try {
     const s = JSON.parse(entry.json);
-    const kind = { single: '한 줄 관', step: '굵기 변화', loop: '합류 관', y: 'Y자' }[s.topology];
+    const kind = { single: '한 줄 관', step: '굵기 변화', loop: '합류 관', y: 'Y자', graph: '구조 키우기' }[s.topology];
     const parts = [...(kind ? [kind] : []), `χ²/N ${s.chi2_per_N.toFixed(2)}`];
     const pieces = (s.thickness && s.thickness.pieces) || [];
     const sizes = pieces.filter(p => p.d_mm !== undefined).map(p => p.d_mm.toFixed(2));
