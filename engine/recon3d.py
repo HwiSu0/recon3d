@@ -937,7 +937,12 @@ def plan(ctx):
         p = r['model'].unpack(r['best'].x)
         Us = p['U'] if r['kind'] != 'graph' else [u for v in r['model'].speeds(p) for u in (v if isinstance(v, list) else [v])]
         r['limit'] = bool(max(Us) > 0.97 * U_MAX or p['tau'] < 0.12)
-    results.sort(key=lambda r: (r.get('dup', False), r['rough'], r['flat'], r['limit'], r['score']))
+    # 다만 범위 끝에 걸린 답이 그렇지 않은 가장 좋은 답보다 점수가 limit_margin(50) 넘게 낮으면 경로 모양이 훨씬 잘 맞는 것이므로 남긴다
+    # (Run #59: 앞머리 폭이 0.12초 아래인 합류 관이 499, 한 줄 관이 607. 곧은 호스 #40의 차이는 22, #58의 Y자는 38)
+    ok = [r['score'] for r in results if not (r.get('dup') or r['rough'] or r['flat'] or r['limit'])]
+    for r in results:
+        r['limit_kept'] = bool(r['limit'] and ok and r['score'] < min(ok) - cfg.get('limit_margin', 50.0))
+    results.sort(key=lambda r: (r.get('dup', False), r['rough'], r['flat'], r['limit'] and not r['limit_kept'], r['score']))
     r0 = results[0]
     # 고른 후보의 다른 답은 원래 해상도로 점수만 다시 매긴다
     jobs = [] if r0['kind'] == 'graph' else [{'stage': 'score', 'c': r0['c'], 'x': r['x']} for r in done[r0['c']][1:] + best[r0['c']][top:]]
@@ -1215,6 +1220,7 @@ def finish(ctx, results, sols):
         summ['topology_scale'] = round(float(results[0]['scale']), 2)
         summ['topology_compare'] = [{'kind': r['kind'], 'name': r['label'], 'chi2_per_N': round(float(r['chi2_per_N']), 3),
                                      'score': round(float(r['score']), 1), 'npar': r['npar'], 'rough': r['rough'], 'flat': r['flat'], 'limit': r['limit'],
+                                     'limit_kept': r.get('limit_kept', False),
                                      'dup': r.get('dup', False)} for r in results]
     summ['exit_used'] = used_cfg['outlet_names']
     if cfg.get('truth_points'):          # 실제 경로의 일부 점만 알 때 (예: 분기점, 합류점)

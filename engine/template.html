@@ -141,12 +141,13 @@ if (S.knocks && S.knocks.length) {
   rows.push(['충격', `${span} <span class="meta">(센서가 흔들린 구간. 값의 어긋남을 없애고 맞춤에서 뺌)</span>`]);
   if (S.knocks.some(([a, b]) => b > S.fit_window[0] && a < S.fit_window[1])) rows.push(['주의', `<span class="bad">맞춘 구간 안에 충격이 있어 이 구간의 값은 덜 정확할 수 있음</span>`]);
 }
-if (S.topology_compare) rows.push(['구조', S.topology_compare.map((r, i) => `${i === 0 ? '<b>' : ''}${r.name}${r.flat ? ' (굵기 변화 없음)' : ''}${r.limit ? ' (탐색 범위 끝)' : ''}${r.dup ? ' (같은 구조는 후보 맞춤 답을 씀)' : ''}: χ²/N ${r.rough ? '약 ' : ''}${r.chi2_per_N.toFixed(2)}, 점수 ${r.score.toFixed(0)}${i === 0 ? '</b>' : ''}`).join('<br>')]);
+if (S.topology_compare) rows.push(['구조', S.topology_compare.map((r, i) => `${i === 0 ? '<b>' : ''}${r.name}${r.flat ? ' (굵기 변화 없음)' : ''}${r.limit ? (r.limit_kept ? ' (탐색 범위 끝이지만 훨씬 잘 맞아 남김)' : ' (탐색 범위 끝)') : ''}${r.dup ? ' (같은 구조는 후보 맞춤 답을 씀)' : ''}: χ²/N ${r.rough ? '약 ' : ''}${r.chi2_per_N.toFixed(2)}, 점수 ${r.score.toFixed(0)}${i === 0 ? '</b>' : ''}`).join('<br>')]);
 if (S.grow_history && S.grow_history.length) rows.push(['구조 키우기', S.grow_history.map(h => `${h.step}단계 ${h.added}: χ²/N ${h.chi2_per_N.toFixed(2)}${h.gain !== undefined ? `, 보정 개선량 ${h.gain.toFixed(0)}` : ''}`).join('<br>')]);
 if (S.topology_compare && S.chi2_per_N > 2) rows.push(['주의', `<span class="bad">χ²/N이 커서 구조 선택을 믿기 어려움</span>`]);
 (S.sensors_swapped || []).forEach(([a, b]) => rows.push(['주의', `<span class="bad">코일 자기장 크기로 보면 ${a}와 ${b}의 위치나 ID가 서로 바뀐 것 같음</span>`]));
 if (S.at_limit) rows.push(['주의', `<span class="bad">속도나 앞머리 폭이 탐색 범위 끝에 걸림. 앞머리가 너무 빨라 경로 정보가 부족할 수 있음</span>`]);
-const ranked = (S.topology_compare || []).filter(r => !r.flat && !r.limit && !r.dup);
+const ranked = (S.topology_compare || []).filter(r => !r.flat && (!r.limit || r.limit_kept) && !r.dup);
+if (S.topology_compare && S.topology_compare[0].limit) rows.push(['주의', `<span class="bad">고른 답의 속도나 앞머리 폭이 탐색 범위 끝에 걸림. 경로 모양은 믿을 만하지만 속도 값은 믿기 어려움</span>`]);
 if (ranked.length > 1 && ranked[1].score - ranked[0].score < 10) rows.push(['주의', `<span class="bad">앞선 두 후보의 점수 차이가 10보다 작아 구조를 정할 수 없음</span>`]);
 if (GRAPH) rows.push(['찾은 부품 (입구부터)', (S.features || []).filter(f => !f.type.startsWith('곡선')).map(f => `${f.type} ${fp(f.p)}${f.ratio ? ` · 굵기 ×${f.ratio.toFixed(2)}` : ''}${f.at_inlet ? ' (입구에서)' : ''}${f.at_outlet ? ' (출구에서)' : ''}`).join('<br>') || '없음 (휘어진 한 줄 관)']);
 if (S.J) rows.push([KEYPT.J, fp(S.J) + pm('J')]);
