@@ -598,6 +598,12 @@ class Context:
             d = self.cands[c]; self.found[c] = Search(d['cfg'], self.tt, self.data, self.I, d['kind'])
         return self.found[c]
 
+def correlation(r, ns, nt):
+    """잔차의 이웃한 시간끼리 닮은 정도 rho. 모델이 설명 못 하는 신호가 남으면 커진다. (1 + rho) / (1 - rho)를 돌려준다."""
+    T = r[:3 * ns * nt].reshape(ns, nt, 3); a = T[:, :-1].ravel(); b = T[:, 1:].ravel()
+    d = float(a @ a); rho = min(max(float(a @ b) / d if d > 0 else 0.0, 0.0), 0.8)
+    return (1 + rho) / (1 - rho)
+
 def do_job(ctx, job):
     """계산 한 조각. 입력과 출력이 숫자뿐이라 다른 워커에 맡길 수 있고, 맡긴 순서와 상관없이 답이 같다."""
     s = ctx.search(job['c']); cfg = s.cfg; st = job['stage']
@@ -632,9 +638,12 @@ def plan(ctx):
     for j, r in zip(jobs, got):
         if r: best[j['c']].append(r)
     for c in best: best[c].sort(key=lambda r: r['cost'])
-    # 2단계에서 크게 뒤처진 후보는 마무리하지 않고 원래 해상도로 점수만 매긴다
-    low = min(r[0]['cost'] for r in best.values() if r)
-    near = [c for c in best if best[c] and best[c][0]['cost'] <= cfg.get('near', 1.5) * low]
+    # 2단계에서 크게 뒤처진 후보는 마무리하지 않고 원래 해상도로 점수만 매긴다.
+    # 매개변수가 더 적은 후보는 남긴다: 실측에서는 복잡한 구조가 잔차를 흡수해 낮은 chi2를 내기 쉽다
+    live = [c for c in best if best[c]]
+    lead = min(live, key=lambda c: best[c][0]['cost']); low = best[lead][0]['cost']
+    size = lambda c: len(best[c][0]['x'])
+    near = [c for c in live if best[c][0]['cost'] <= cfg.get('near', 1.5) * low or size(c) < size(lead)]
     jobs = [{'stage': 'polish', 'c': c, 'x': r['x']} for c in near for r in best[c][:top]]
     jobs += [{'stage': 'score', 'c': c, 'x': best[c][0]['x']} for c in best if best[c] and c not in near]
     print(f'3단계: 답 {len(jobs)}개', flush=True)
@@ -649,9 +658,15 @@ def plan(ctx):
         done[c].sort(key=lambda r: r['cost'])
         x = np.array(done[c][0]['x']); r0 = f(x); Nk = len(r0); chi2 = float(r0 @ r0); npar = len(x)
         results.append({**d, 'c': c, 'search': s, 'model': model, 'Y': Y, 'U': U, 'f': f, 'best': Sol(x, 0.5 * chi2, r0), 'rough': c not in near,
-                        'chi2_per_N': chi2 / Nk, 'bic': chi2 + npar * np.log(Nk), 'npar': npar})
-        print(f"   {d['label']}: chi2/N = {chi2 / Nk:.3f}, BIC = {chi2 + npar * np.log(Nk):.0f}", flush=True)
+                        'chi2_per_N': chi2 / Nk, 'chi2': chi2, 'N': Nk, 'npar': npar})
     if not results: sys.exit('[오류] 어떤 시작점에서도 맞춤이 끝나지 않았어요.')
+    # BIC는 잔차가 서로 독립인 잡음이라고 본다. 실측처럼 그렇지 않으면 chi2 차이를 그만큼 줄이고 독립인 자료 수를 쓴다
+    flex = min(results, key=lambda r: r['chi2'])
+    corr = correlation(flex['best'].fun, len(ctx.data), len(ctx.tt))
+    scale = corr * max(1.0, flex['chi2'] / flex['N'])
+    for r in results:
+        r['bic'] = r['chi2'] / scale + r['npar'] * np.log(r['N'] / corr); r['scale'] = scale
+        print(f"   {r['label']}: chi2/N = {r['chi2_per_N']:.3f}, BIC = {r['bic']:.0f}", flush=True)
     results.sort(key=lambda r: (r['rough'], r['bic']))
     r0 = results[0]
     # 고른 후보의 다른 답은 원래 해상도로 점수만 다시 매긴다
@@ -827,6 +842,7 @@ def finish(ctx, results, sols):
     summ['noise_uT'] = {k: round(float(d['noise']), 3) for k, d in data.items()}
     summ['alternatives'] = [summarize(model, s, N) for s in sols[1:4]]
     if len(results) > 1:
+        summ['topology_scale'] = round(float(results[0]['scale']), 2)
         summ['topology_compare'] = [{'kind': r['kind'], 'name': r['label'], 'chi2_per_N': round(float(r['chi2_per_N']), 3),
                                      'bic': round(float(r['bic']), 1), 'npar': r['npar'], 'rough': r['rough']} for r in results]
     summ['exit_used'] = used_cfg['outlet_names']

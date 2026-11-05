@@ -126,12 +126,8 @@ def window_data(tt, data, a, b):
 def residual_inflation(r, n_sensor_axes):
     """잔차가 chi2/N 1을 넘거나 이웃 구간끼리 닮은 만큼 불확도를 키운다."""
     r = np.asarray(r)
-    rows = r.reshape(n_sensor_axes, -1)
-    a = rows[:, :-1].ravel(); b = rows[:, 1:].ravel()
-    denom = float(a @ a)
-    rho = float(a @ b) / denom if denom > 0 else 0.0
-    rho = min(max(rho, 0.0), 0.8)
-    return max(1.0, float(r @ r) / max(1, r.size)) * (1 + rho) / (1 - rho)
+    ns = n_sensor_axes // 3
+    return max(1.0, float(r @ r) / max(1, r.size)) * R.correlation(r, ns, r.size // n_sensor_axes)
 
 
 class Fitter:
