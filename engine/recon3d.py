@@ -24,6 +24,7 @@ from scipy.special import ellipk, ellipe
 from contextlib import contextmanager
 
 MU0 = 4e-7 * math.pi
+U_MAX = 80.0      # 앞머리 속도 탐색 범위 끝 (cm/s). 주사기를 빨리 누르면 입구 호스 110 cm를 4초에 지나간다 (Run #59, 약 27 cm/s)
 # ---------------- coil model (lab frame: x=a, y=c, z=b; cm) ----------------
 R200 = (0.1006 + 0.1058) / 2; R500 = (0.1006 + 0.1137) / 2; DCOIL = 0.12
 AXIS_Y, AXIS_Z, XC = 16.5, 4.0, 5.0
@@ -118,6 +119,18 @@ def quiet(tt, data, start, span=12.0, win=2.5, sig=5.0, need=2):
     return moved.max() < need
 
 def arrival(tt, data):
+    on = _arrival(tt, data)
+    # 처음 기준에서 조금씩 흐른 표류가 쌓이면 철이 오기 한참 전을 도착으로 잡는다 (Run #59: 신호가 크게 오르는 때는 약 70초인데 25.8초).
+    # 신호가 크게 오르는 때(최대의 30%)보다 20초 넘게 이르면, 그 직전을 새 기준으로 삼아 다시 찾는다
+    if on is not None and data:
+        big = auto_t_on(tt, data)
+        if big - on > 20:
+            again = first_motion(tt, data, max(float(tt[0]), big - 12))
+            if again is not None and again <= big: return again
+            return max(float(tt[0]), big - 4)
+    return on
+
+def _arrival(tt, data):
     """철이 처음 닿는 시각. 충격 때문에 값이 어긋난 것을 철로 착각하지 않게 충격 뒤 잔잔한 구간을 새 기준으로 삼아 다시 찾는다.
     충격 뒤가 잔잔하지 않으면 충격과 철이 같이 온 것이므로 그 앞에서 찾은 시각을 쓴다."""
     dead = np.all([d['w'] == 0 for d in data.values()], 0)
@@ -415,12 +428,12 @@ class Model:
         lo = []; hi = []
         if self.nb >= 2: lo += list(self.plo); hi += list(self.phi)
         for _ in range(self.nb): lo += list(self.plo); hi += list(self.phi)
-        lo += [-60, 0.3]; hi += [200, 30]
+        lo += [-60, 0.3]; hi += [200, U_MAX]
         if self.phys:
             if not self.phys.get('split'): lo += [0.02] * (self.nb - 1); hi += [0.98] * (self.nb - 1)
             lo += [0.0]; hi += [3.0]
         else:
-            lo += [0.1] * self.nb; hi += [30] * self.nb
+            lo += [0.1] * self.nb; hi += [U_MAX] * self.nb
             lo += [0.0]; hi += [3.0]
             lo += [0.0] * self.nb; hi += [3.0] * self.nb
         lo += [0.1]; hi += [20]
@@ -468,12 +481,12 @@ class ModelLoop:
                 'lam0': q[16], 'lam': [q[17], q[18]], 'tau': q[19]}
     def bounds(self):
         if self.tie == 'flow':
-            lo = list(self.plo) * 4 + [-60, 0.3, 0.0, 0.1]; hi = list(self.phi) * 4 + [200, 30, 3.0, 20]
+            lo = list(self.plo) * 4 + [-60, 0.3, 0.0, 0.1]; hi = list(self.phi) * 4 + [200, U_MAX, 3.0, 20]
         elif self.tie:
-            lo = list(self.plo) * 4 + [-60, 0.3, 0.1, 0.1, 0.0, 0.1]; hi = list(self.phi) * 4 + [200, 30, 30, 30, 3.0, 20]
+            lo = list(self.plo) * 4 + [-60, 0.3, 0.1, 0.1, 0.0, 0.1]; hi = list(self.phi) * 4 + [200, U_MAX, U_MAX, U_MAX, 3.0, 20]
         else:
             lo = list(self.plo) * 4 + [-60, 0.3, 0.1, 0.1, 0.0, 0.0, 0.0, 0.1]
-            hi = list(self.phi) * 4 + [200, 30, 30, 30, 3.0, 3.0, 3.0, 20]
+            hi = list(self.phi) * 4 + [200, U_MAX, U_MAX, U_MAX, 3.0, 3.0, 3.0, 20]
         return np.array(lo, float), np.array(hi, float)
     def paths(self, p):
         g = self.g; O = g.outlets[self.oi]
@@ -533,8 +546,8 @@ class ModelStep:
         if self.tie: p['U'][0] = min(p['U'][0], 60.0)
         return p
     def bounds(self):
-        lo = list(self.plo) + [0.05, -60, 0.3, 0.0, 0.0, 0.1]; hi = list(self.phi) + [0.95, 200, 30, 3.0, 6.0, 20]
-        if not self.tie: lo += [0.1]; hi += [30]
+        lo = list(self.plo) + [0.05, -60, 0.3, 0.0, 0.0, 0.1]; hi = list(self.phi) + [0.95, 200, U_MAX, 3.0, 6.0, 20]
+        if not self.tie: lo += [0.1]; hi += [U_MAX]
         return np.array(lo, float), np.array(hi, float)
     def _line(self, p):
         g = self.g; return [g.inlet, p['C'][0], g.outlets[self.oi]]
@@ -923,7 +936,7 @@ def plan(ctx):
     for r in results:
         p = r['model'].unpack(r['best'].x)
         Us = p['U'] if r['kind'] != 'graph' else [u for v in r['model'].speeds(p) for u in (v if isinstance(v, list) else [v])]
-        r['limit'] = bool(max(Us) > 29 or p['tau'] < 0.12)
+        r['limit'] = bool(max(Us) > 0.97 * U_MAX or p['tau'] < 0.12)
     results.sort(key=lambda r: (r.get('dup', False), r['rough'], r['flat'], r['limit'], r['score']))
     r0 = results[0]
     # 고른 후보의 다른 답은 원래 해상도로 점수만 다시 매긴다
@@ -1193,7 +1206,7 @@ def finish(ctx, results, sols):
     summ['knocks'] = cfg.get('knocks', [])
     summ['sensors_swapped'] = swapped_sensors(data, model.g.sensors, I)
     pb = model.unpack(sols[0].x)
-    summ['at_limit'] = bool(pb['U0'] > 29 or pb['tau'] < 0.12)      # 앞머리가 지나가는 신호로 보기 어려운 답
+    summ['at_limit'] = bool(pb['U0'] > 0.97 * U_MAX or pb['tau'] < 0.12)      # 앞머리가 지나가는 신호로 보기 어려운 답
     summ['alternatives'] = [summarize(model, s, N) for s in sols[1:4]] if model.kind != 'graph' else []
     summ['sensor_check'] = sensor_check(data, model.g.sensors, I)
     try: summ['uncertainty'] = point_uncertainty(model, f, sols[0].x, r0.get('scale', 1.0))

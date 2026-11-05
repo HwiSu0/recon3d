@@ -20,7 +20,7 @@ import numpy as np
 from scipy.optimize import least_squares
 import recon3d as R
 
-SPEED_GRID = np.exp(np.linspace(np.log(0.3), np.log(30.0), 13))   # cm/s
+SPEED_GRID = np.exp(np.linspace(np.log(0.3), np.log(80.0), 15))   # cm/s (recon3d.U_MAX와 맞춤)
 RESOLVE_SIGMA = 3.0      # U/2, 2U에서 이만큼 나빠져야 속도가 정해졌다고 본다
 MAX_REL_ERR = 0.5
 FLOW_REL_ERR = 0.05      # 유량 측정의 상대 불확도(눈금 읽기와 시간 재기 가정)

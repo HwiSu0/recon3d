@@ -43,9 +43,9 @@ class ModelGraph:
             else:
                 for vv in sc['v']:
                     for p in vv: P(p)
-                S(sc['U'][0], 0.1, 30); S(sc['U'][1], 0.1, 30)
-        for gr in st['grp']: S(gr['lam'], 0.0, 6.0); S(gr['U'], 0.1, 30)
-        S(st['lam_up'], 0.0, 3.0); S(st['t0'], -60, 250); S(st['U0'], 0.3, 30); S(st['tau'], 0.1, 20)
+                S(sc['U'][0], 0.1, R.U_MAX); S(sc['U'][1], 0.1, R.U_MAX)
+        for gr in st['grp']: S(gr['lam'], 0.0, 6.0); S(gr['U'], 0.1, R.U_MAX)
+        S(st['lam_up'], 0.0, 3.0); S(st['t0'], -60, 250); S(st['U0'], 0.3, R.U_MAX); S(st['tau'], 0.1, 20)
         lo = np.array(lo, float); hi = np.array(hi, float)
         return np.clip(np.array(q, float), lo + 1e-6, hi - 1e-6), lo, hi
 
