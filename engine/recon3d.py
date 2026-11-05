@@ -232,8 +232,10 @@ def bin_run(cfg, tab, baseline, window):
         for ma, mb in list(cfg.get('mask', {}).get(k, [])) + cfg.get('knocks', []):      # 고장/외부 방해 구간 제외
             w[(tc >= ma) & (tc < mb)] = 0
         w[np.isnan(V).any(1)] = 0
-        bad = np.where(np.nan_to_num(np.linalg.norm(V, axis=1)) > cfg.get('glitch_uT', 30.0))[0]
-        if len(bad): w[bad[0]:] = 0                        # 철로 설명되지 않는 큰 값이 나오면 그 뒤로 이 센서를 쓰지 않는다
+        # 철로 설명되지 않는 큰 값이 나오면 그 뒤로 이 센서를 쓰지 않는다. 충격이나 뺄 구간으로 이미 뺀 칸은 보지 않는다
+        # (무선 센서가 한 번 튄 값(예: Run #59 S3의 17.1초)이 충격으로 빠졌는데도 센서 전체가 버려지던 문제)
+        bad = np.where((w > 0) & (np.nan_to_num(np.linalg.norm(V, axis=1)) > cfg.get('glitch_uT', 30.0)))[0]
+        if len(bad): w[bad[0]:] = 0
         V[w == 0] = 0
         data[k] = {'b0': b0, 'dB': V, 'noise': max(noise, cfg.get('noise_floor', 0.05)), 'w': w}
     return tc, data, Iref
