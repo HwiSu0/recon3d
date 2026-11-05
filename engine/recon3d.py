@@ -87,16 +87,41 @@ def bin_mean(t, v, a, dt):
     with np.errstate(invalid='ignore', divide='ignore'):
         return (C[i1] - C[i0]) / (i1 - i0)[:, None]
 
+def first_motion(tt, data, hold=2.0, sig=5.0, need=2):
+    """철 신호가 처음 나타나는 시각. 센서 두 대 이상이 처음 10초의 흔들림을 뚜렷이 벗어나 2초 넘게 유지되는 때."""
+    dt = tt[1] - tt[0]; n = max(1, int(round(1.5 / dt))); h = max(1, int(round(hold / dt))); above = []
+    for d in data.values():
+        s = np.convolve(np.linalg.norm(d['dB'] * d['w'][:, None], axis=1), np.ones(n) / n, mode='same')
+        q = s[:max(8, int(10 / dt))]
+        above.append(s > q.mean() + sig * max(q.std(), 0.02))
+    a = np.sum(above, 0) >= need
+    for i in range(len(a) - h):
+        if a[i:i + h].all(): return float(tt[i])
+    return None
+
 def load(cfg):
-    run = cfg['run']; ids = cfg['ids']
+    """기준 구간이나 분석 구간이 없으면 측정값에서 찾아 cfg에 적어 둔다."""
     tab = read_table(cfg)
+    if not (cfg.get('baseline') and cfg.get('t_window')):
+        t = tab[f"Time (s) Run #{cfg['run']}"]; t = t[~np.isnan(t)]
+        first = float(t[0]) + 1; last = float(t[-1])
+        tt, data, _ = bin_run(cfg, tab, cfg.get('baseline') or [first, min(first + 10, last)], cfg.get('t_window') or [first, last])
+        t_on = first_motion(tt, data)
+        if t_on is None: t_on = first + 23
+        # 철이 오기 직전의 조용한 구간이 표류가 가장 적다
+        cfg.setdefault('baseline', [max(first, t_on - 15), max(first + 5, t_on - 4)])
+        cfg.setdefault('t_window', [first, min(last, t_on + 45)])
+    return bin_run(cfg, tab, cfg['baseline'], cfg['t_window'])
+
+def bin_run(cfg, tab, baseline, window):
+    run = cfg['run']; ids = cfg['ids']
     col = lambda name: tab[name][~np.isnan(tab[name])]
     t = col(f'Time (s) Run #{run}')
     I = col(f'Output Current (A) Run #{run}')
     n = min(len(t), len(I)); t = t[:n]; I = I[:n]
-    b0a, b0b = cfg.get('baseline', [2, 12])
+    b0a, b0b = baseline
     m0 = (t > b0a) & (t < b0b); Iref = I[m0].mean()
-    t0, t1 = cfg['t_window']; dt = cfg.get('bin', 0.5)
+    t0, t1 = window; dt = cfg.get('bin', 0.5)
     t0 = max(t0, float(t[0])); t1 = min(t1, float(t[-1]))      # 데이터 길이를 넘으면 자동으로 줄임
     edges = np.arange(t0, t1 + 1e-9, dt); tc = (edges[:-1] + edges[1:]) / 2
     data = {}
@@ -117,6 +142,9 @@ def load(cfg):
         w = np.ones(len(tc))
         for ma, mb in cfg.get('mask', {}).get(k, []):      # 고장/외부 방해 구간 제외
             w[(tc >= ma) & (tc < mb)] = 0
+        w[np.isnan(V).any(1)] = 0
+        bad = np.where(np.nan_to_num(np.linalg.norm(V, axis=1)) > cfg.get('glitch_uT', 30.0))[0]
+        if len(bad): w[bad[0]:] = 0                        # 철로 설명되지 않는 큰 값이 나오면 그 뒤로 이 센서를 쓰지 않는다
         V[w == 0] = 0
         data[k] = {'b0': b0, 'dB': V, 'noise': max(noise, cfg.get('noise_floor', 0.05)), 'w': w}
     return tc, data, Iref
@@ -619,6 +647,11 @@ class Context:
         topo = cfg.get('topology', 'y' if nb >= 2 else 'auto')
         # 출구 고르기: "exit": "auto"(출구마다 다 맞춰 보고 고름) 또는 출구 번호(0부터)
         exit_sel = cfg.get('exit', 'auto' if (nb >= 2 and topo != 'y') else 0)
+        # 유량을 잰 출구가 곧 쓴 출구다: 한 곳이면 그 출구, 두 곳 이상이면 Y자
+        used = [i for i, q in enumerate((cfg.get('flow_mL_s') or [])[:nb]) if q]
+        if topo == 'auto' and exit_sel == 'auto' and used:
+            if len(used) == 1: exit_sel = used[0]; cfg['try_y'] = False
+            else: topo = 'y'
         one = cfg.get('candidates', ['single', 'step', 'loop']) if topo == 'auto' else ([topo] if topo != 'y' else [])
         hm = cfg.get('hose_mm') or {}
         if topo == 'auto' and hm.get('branches') and all(abs(d - hm.get('stem', 3)) < 1e-6 for d in hm['branches']):
@@ -852,7 +885,7 @@ def geom_payload(cfg, nb):
     bx = cfg['box']; w = cfg.get('wall', 0.5)
     outer = cfg.get('box_outer') or {'a': [bx['a'][0], bx['a'][1]], 'b': [bx['b'][0] - w, bx['b'][1] + w], 'c': [bx['c'][0] - w, bx['c'][1] + w]}
     hose = cfg.get('hose_mm') or {'stem': 3, 'branches': [3] * nb}
-    return {'box_outer': outer, 'wall': w, 'hole_mm': cfg.get('hole_mm', 6.5), 'hose_mm': hose,
+    return {'box_outer': outer, 'wall': w, 'hole_mm': cfg.get('hole_mm', 6.5), 'hose_mm': hose, 'hose_known': bool(cfg.get('hose_mm')),
             'hose_wall_mm': cfg.get('hose_wall_mm', 1.0), 'outlet_len': cfg.get('outlet_len', 20.0),
             'up_dir': cfg.get('upstream_dir_abc', [-1, 0, 0]), 'out_dir': cfg.get('outlet_dir_abc', [1, 0, 0]),
             'coils': [{'a': XC - DCOIL * 50, 'R': R200 * 100, 'name': '200회 코일'}, {'a': XC + DCOIL * 50, 'R': R500 * 100, 'name': '500회 코일'}],
@@ -929,6 +962,7 @@ def finish(ctx, results, sols):
     summ = summarize(model, sols[0], N); summ['chi2_per_N_no_iron_model'] = z
     summ['noise_uT'] = {k: round(float(d['noise']), 3) for k, d in data.items()}
     summ['fit_window'] = [round(float(v), 1) for v in ctx.win]
+    summ['baseline'] = [round(float(v), 1) for v in cfg['baseline']]; summ['t_window'] = [round(float(v), 1) for v in cfg['t_window']]
     summ['sensors_swapped'] = swapped_sensors(data, model.g.sensors, I)
     pb = model.unpack(sols[0].x)
     summ['at_limit'] = bool(pb['U0'] > 29 or pb['tau'] < 0.12)      # 앞머리가 지나가는 신호로 보기 어려운 답
@@ -956,7 +990,7 @@ def finish(ctx, results, sols):
             import thickness
             tcfg = dict(used_cfg)
             # 적어 둔 실제 경로가 복원 경로보다 측정을 훨씬 못 맞추면 그 경로로 속도를 재지 않는다
-            if summ.get('chi2_per_N_truth_path', 0) > 1.25 * summ['chi2_per_N']: tcfg.pop('truth', None)
+            if cfg.get('blind') or summ.get('chi2_per_N_truth_path', 0) > 1.25 * summ['chi2_per_N']: tcfg.pop('truth', None)
             flows = cfg.get('flow_mL_s') or []
             tcfg['flow_mL_s'] = [flows[i] if i < len(flows) else None for i in r0['idx']]
             best_p = model.unpack(sols[0].x)

@@ -40,6 +40,18 @@
         <input type="file" id="csvInput" accept=".csv,text/csv" hidden>
       </div>
 
+      <label class="wide">Run
+        <select id="fRunSel" hidden></select>
+        <input type="number" id="fRun" min="1" step="1">
+      </label>
+
+      <div>
+        <h2>출구별 유량 <small>mL/s, 안 쓴 출구는 비움</small></h2>
+        <div class="flows" id="flowRows"></div>
+      </div>
+
+      <details id="advanced">
+        <summary>고급 설정</summary>
       <div class="line">
         <select id="preset" aria-label="설정"></select>
         <button type="button" id="openCfg">열기</button>
@@ -48,25 +60,21 @@
       </div>
 
       <div class="fields">
-        <label>Run
-          <select id="fRunSel" hidden></select>
-          <input type="number" id="fRun" min="1" step="1">
-        </label>
         <label>철 도착 예상 (s)
           <input type="number" id="fFront" step="any" placeholder="자동">
         </label>
         <div class="field">
           <span id="lblBase">기준 구간 (s)</span>
           <div class="pair">
-            <input type="number" id="fBase0" step="any" aria-labelledby="lblBase">
-            <input type="number" id="fBase1" step="any" aria-labelledby="lblBase">
+            <input type="number" id="fBase0" step="any" placeholder="자동" aria-labelledby="lblBase">
+            <input type="number" id="fBase1" step="any" placeholder="자동" aria-labelledby="lblBase">
           </div>
         </div>
         <div class="field">
           <span id="lblWin">분석 구간 (s)</span>
           <div class="pair">
-            <input type="number" id="fWin0" step="any" aria-labelledby="lblWin">
-            <input type="number" id="fWin1" step="any" aria-labelledby="lblWin">
+            <input type="number" id="fWin0" step="any" placeholder="자동" aria-labelledby="lblWin">
+            <input type="number" id="fWin1" step="any" placeholder="자동" aria-labelledby="lblWin">
           </div>
         </div>
       </div>
@@ -77,9 +85,9 @@
         <tbody></tbody>
       </table>
 
-      <h2>입구와 출구 <small>cm, 유량 mL/s</small></h2>
+      <h2>입구와 출구 <small>cm</small></h2>
       <table id="portTable">
-        <thead><tr><th scope="col"></th><th scope="col">a</th><th scope="col">b</th><th scope="col">c</th><th scope="col">유량</th><th scope="col"><span class="sr">삭제</span></th></tr></thead>
+        <thead><tr><th scope="col"></th><th scope="col">a</th><th scope="col">b</th><th scope="col">c</th><th scope="col"><span class="sr">삭제</span></th></tr></thead>
         <tbody></tbody>
       </table>
       <button type="button" class="text" id="addOutlet">출구 추가</button>
@@ -105,10 +113,10 @@
           </select>
         </label>
         <label>입구 쪽 내경 (mm)
-          <input type="number" id="fStem" step="any" min="0">
+          <input type="number" id="fStem" step="any" min="0" placeholder="자동">
         </label>
         <label>뒤쪽, 갈래 내경 (mm)
-          <input type="text" id="fBranches" autocomplete="off">
+          <input type="text" id="fBranches" autocomplete="off" placeholder="자동">
         </label>
         <label>입구 앞 호스 (cm)
           <input type="number" id="fUp" step="any" min="0">
@@ -124,6 +132,7 @@
         <summary>JSON</summary>
         <textarea id="cfgText" rows="14" spellcheck="false" aria-label="설정 JSON"></textarea>
         <p class="error" id="cfgError" hidden></p>
+      </details>
       </details>
     </div>
 

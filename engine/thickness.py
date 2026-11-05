@@ -103,6 +103,9 @@ class FrontModel:
 def onset(tt, data):
     """신호가 기준 구간 잡음을 뚜렷하게 벗어나는 첫 시각.
     앞머리는 모든 센서에 나타나므로 센서들의 중앙값을 써서 한 센서의 튀는 값에 끌려가지 않게 한다."""
+    first = R.first_motion(tt, data)
+    if first is not None:
+        return first
     snr = np.stack([np.where(d['w'] > 0, np.linalg.norm(d['dB'], axis=1) / d['noise'], np.nan) for d in data.values()])
     s = np.nanmedian(snr, axis=0)
     n = max(1, int(round(1.5 / (tt[1] - tt[0]))))
@@ -222,7 +225,7 @@ def nodes_from(cfg, model, best_nodes):
 def piece_info(cfg, model, n):
     """구간 이름, 구간마다 흐르는 유량, 설정의 내경"""
     nb = len(cfg['outlets'])
-    hose = cfg.get('hose_mm') or {'stem': 3, 'branches': []}
+    hose = cfg.get('hose_mm') or {'stem': None, 'branches': []}
     stem = hose['stem']
     br = list(hose.get('branches') or [])
     br += [stem] * max(0, n - len(br))
@@ -328,9 +331,11 @@ def measure(cfg, tt, data, I, model, nodes, path_kind):
     if n >= 2 and lam_err is not None:
         for k in range(1, n):
             rel = math.hypot(lam_err[k] / max(lam[k], 1e-9), lam_err[0] / max(lam[0], 1e-9))
-            d = dset[0] * math.sqrt(lam[k] / max(lam[0], 1e-9))
-            # 농도가 같다는 가정이 맞으면 설정 내경의 두 배 안쪽에 들어온다
-            item = {'name': names[k], 'resolved': bool(rel < 0.4 and 0.5 * dset[k] < d < 2 * dset[k])}
+            base = dset[0] or pieces[0].get('d_mm')     # 호스 굵기를 안 알려 주면 유량으로 구한 입구 쪽 내경을 쓴다
+            d = (base or 0) * math.sqrt(lam[k] / max(lam[0], 1e-9))
+            # 농도가 같다는 가정이 맞으면 설정 내경의 두 배 안쪽, 설정이 없으면 쓰는 호스 범위 안에 들어온다
+            low, high = (0.5 * dset[k], 2 * dset[k]) if dset[k] else (1.5, 10.0)
+            item = {'name': names[k], 'resolved': bool(rel < 0.4 and low < d < high)}
             if item['resolved']:
                 item['d_mm'] = round(float(d), 2); item['d_err_mm'] = round(float(d * rel / 2), 2)
             ratio.append(item)

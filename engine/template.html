@@ -133,6 +133,7 @@ const estD = S.lam.map(l => (S.lam0 > 1e-6 && l > 0) ? hoseMM.stem * Math.sqrt(l
 const rows = [];
 rows.push(['χ²/N', `${S.chi2_per_N.toFixed(2)} <span class="meta">(철 없음 ${S.chi2_per_N_no_iron_model.toFixed(2)})</span>`]);
 if (S.fit_window) rows.push(['맞춘 구간', `${S.fit_window[0]}~${S.fit_window[1]} s`]);
+if (S.baseline) rows.push(['기준 구간', `${S.baseline[0]}~${S.baseline[1]} s`]);
 if (S.topology_compare) rows.push(['구조', S.topology_compare.map((r, i) => `${i === 0 ? '<b>' : ''}${r.name}${r.flat ? ' (굵기 변화 없음)' : ''}: χ²/N ${r.rough ? '약 ' : ''}${r.chi2_per_N.toFixed(2)}, BIC ${r.bic.toFixed(0)}${i === 0 ? '</b>' : ''}`).join('<br>')]);
 if (S.topology_compare && S.chi2_per_N > 2) rows.push(['주의', `<span class="bad">χ²/N이 커서 구조 선택을 믿기 어려움</span>`]);
 (S.sensors_swapped || []).forEach(([a, b]) => rows.push(['주의', `<span class="bad">코일 자기장 크기로 보면 ${a}와 ${b}의 위치나 ID가 서로 바뀐 것 같음</span>`]));
@@ -457,7 +458,7 @@ function start3D() {
     const P0 = best[0][best[0].length - 1], dirA = V3.norm(V3.sub(P0, best[0][best[0].length - 2])), dB = hoseMM.branches[0] || hoseMM.stem;
     addMesh(cyl(V3.sub(P0, V3.mul(dirA, 0.45)), V3.add(P0, V3.mul(dirA, 0.45)), rOut(hoseMM.stem) * 1.15, rOut(dB) * 1.15, 32, true), { col: [0.95, 0.70, 0.20], spec: 0.6, shin: 50 }, 'hose');
     addMesh(sphere(P0, 0.7, 28), { col: [1.0, 0.72, 0.18], alpha: 0.18, fres: 0.5, spec: 0.2, shin: 20, transparent: true, pulse: true }, 'hose');
-    addLabel(P0, `P ${hoseMM.stem}→${dB} mm`, null, true);
+    addLabel(P0, G.hose_known ? `P ${hoseMM.stem}→${dB} mm` : 'P 굵기 변화', null, true);
     const Cw = W(S.C[0]); addMesh(torus(Cw, V3.norm(V3.sub(W(D.outlets[0]), inletW)), rOut(dB) * 1.7, 0.05, 40, 8), { col: [0.6, 0.6, 0.65], spec: 0.4, shin: 30 }, 'hose');
     if (V3.len(V3.sub(Cw, P0)) > 1) addLabel(Cw, 'C', css('--muted'), false);
   }
@@ -641,7 +642,7 @@ function drawThickness() {
   const body = T.pieces.map(p => {
     const speed = p.resolved ? `${p.U.toFixed(2)} ± ${p.U_err.toFixed(2)}` : '<span class="bad">판정 불가</span>';
     const d = p.d_mm !== undefined ? `<b>${p.d_mm.toFixed(2)} ± ${p.d_err_mm.toFixed(2)}</b>` : '-';
-    return `<tr><td>${p.name}</td>${cell(speed)}${cell(p.Q_mL_s ? p.Q_mL_s.toFixed(3) : '-')}${cell(d)}${cell(p.d_set_mm)}</tr>`;
+    return `<tr><td>${p.name}</td>${cell(speed)}${cell(p.Q_mL_s ? p.Q_mL_s.toFixed(3) : '-')}${cell(d)}${cell(p.d_set_mm === null || p.d_set_mm === undefined ? '-' : p.d_set_mm)}</tr>`;
   }).join('');
   const ratio = (T.from_signal_ratio || []).map(r => `<tr><td>${r.name} λ비</td>${cell('')}${cell('')}${cell(r.resolved ? `${r.d_mm.toFixed(2)} ± ${r.d_err_mm.toFixed(2)}` : '<span class="bad">판정 불가</span>')}${cell('')}</tr>`).join('');
   table.innerHTML = head + body + ratio;

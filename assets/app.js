@@ -60,11 +60,7 @@ async function setFile(file) {
   state.columns = columns;
   $('fileInfo').textContent = `${file.name} (${runLabel(columns)})`;
   $('fileInfo').title = `${file.name}, ${(file.size / 1e6).toFixed(1)} MB`;
-  if (!columns.has(state.cfg.run)) {
-    const match = state.presets.find(p => columns.has(Number(p.id.slice(1))));
-    if (match) await usePreset(match.id);
-    else state.cfg.run = Math.max(...columns.keys());
-  }
+  if (!columns.has(state.cfg.run)) await useRun(Math.max(...columns.keys()));
   state.table = null;
   fillRun(); sync();
   startPool();
@@ -92,8 +88,25 @@ async function usePreset(id) {
   $('preset').value = id;
 }
 
+/* 측정값과 유량만으로 복원한다. Run에 맞는 장치 위치만 가져오고 사람이 알려 주던 값은 모두 뺀다 */
+const KNOWN = ['baseline', 't_window', 't_front_guess', 'hose_mm', 'candidates', 'try_y', 'exit', 'mask', 'tie_lambda'];
+async function useRun(run) {
+  const ids = state.presets.map(p => Number(p.id.slice(1))).sort((a, b) => a - b);
+  const id = ids.filter(r => r <= run).pop() || ids[0];
+  const res = await fetch(`configs/config_r${id}.json`);
+  if (!res.ok) { showError('설정 파일을 불러오지 못함'); return; }
+  const cfg = await res.json();
+  for (const key of KNOWN) delete cfg[key];
+  if (id !== run) { delete cfg.flow_mL_s; delete cfg.truth; delete cfg.truth_points; }
+  cfg.run = run; cfg.blind = true; cfg.topology = 'auto';
+  cfg.title = `Run #${run} 3D 복원`;
+  cfg.prior = cfg.prior || { straight_sigma_cm: 1.5, downhill: true };
+  setConfig(cfg);
+  $('preset').value = '';
+}
+
 function normalize(cfg) {
-  if (!cfg.hose_mm) cfg.hose_mm = { stem: 3, branches: cfg.outlets.map(() => 3) };
+  if (!cfg.hose_mm && !cfg.blind) cfg.hose_mm = { stem: 3, branches: cfg.outlets.map(() => 3) };
   if (!cfg.outlet_names) cfg.outlet_names = cfg.outlets.map((_, i) => `출구${i + 1}`);
   return cfg;
 }
@@ -134,8 +147,8 @@ function fillForm() {
   $('fWin0').value = val(c.t_window && c.t_window[0]); $('fWin1').value = val(c.t_window && c.t_window[1]);
   $('fUp').value = val(c.upstream_len); $('fOut').value = val(c.outlet_len);
   $('fCurve').value = c.curve === false ? 'kink' : c.curve === 'free' ? 'free' : 'hole';
-  $('fStem').value = val(c.hose_mm.stem);
-  $('fBranches').value = (c.hose_mm.branches || []).join(', ');
+  $('fStem').value = val(c.hose_mm && c.hose_mm.stem);
+  $('fBranches').value = ((c.hose_mm && c.hose_mm.branches) || []).join(', ');
   delete $('fBranches').dataset.bad;
   fillRun(); fillSensors(); fillPorts();
   $('fTruth').disabled = !state.truth;
@@ -205,14 +218,11 @@ function fillPorts() {
   const inlet = body.insertRow();
   inlet.insertCell().textContent = '입구';
   ['a', 'b', 'c'].forEach((axis, i) => cell(inlet, numInput(c.inlet[i], `입구 ${axis}`, v => { c.inlet[i] = v; })));
-  inlet.insertCell(); inlet.insertCell();
+  inlet.insertCell();
   c.outlets.forEach((port, k) => {
     const row = body.insertRow();
-    cell(row, textInput(c.outlet_names[k], `출구 ${k + 1} 이름`, v => { c.outlet_names[k] = v; fillStructure(); }));
+    cell(row, textInput(c.outlet_names[k], `출구 ${k + 1} 이름`, v => { c.outlet_names[k] = v; fillStructure(); fillFlows(); }));
     ['a', 'b', 'c'].forEach((axis, i) => cell(row, numInput(port[i], `출구 ${k + 1} ${axis}`, v => { port[i] = v; })));
-    const flow = numInput(c.flow_mL_s ? c.flow_mL_s[k] : null, `출구 ${k + 1} 유량`, v => setFlow(k, v));
-    flow.min = '0';
-    cell(row, flow);
     const td = row.insertCell();
     if (c.outlets.length > 1) {
       const del = document.createElement('button');
@@ -228,6 +238,19 @@ function fillPorts() {
     }
   });
   fillStructure();
+  fillFlows();
+}
+
+function fillFlows() {
+  const c = state.cfg, box = $('flowRows');
+  box.replaceChildren(...c.outlets.map((_, k) => {
+    const label = document.createElement('label');
+    label.append(c.outlet_names[k]);
+    const flow = numInput(c.flow_mL_s ? c.flow_mL_s[k] : null, `${c.outlet_names[k]} 유량`, v => setFlow(k, v));
+    flow.min = '0'; flow.placeholder = '모름';
+    label.append(flow);
+    return label;
+  }));
 }
 
 function wireFields() {
@@ -235,19 +258,30 @@ function wireFields() {
   const bind = (id, apply) => $(id).addEventListener('input', e => { apply(e.target.value); sync(); });
   const optional = (key, v) => { const n = toNum(v); if (n === null) delete c()[key]; else c()[key] = n; };
   bind('fRun', v => { c().run = toNum(v); });
-  $('fRunSel').addEventListener('change', e => { c().run = Number(e.target.value); fillRun(); sync(); });
+  $('fRunSel').addEventListener('change', async e => { await useRun(Number(e.target.value)); state.table = null; fillRun(); sync(); });
   bind('fFront', v => optional('t_front_guess', v));
-  bind('fBase0', v => { c().baseline = [toNum(v), c().baseline ? c().baseline[1] : null]; });
-  bind('fBase1', v => { c().baseline = [c().baseline ? c().baseline[0] : null, toNum(v)]; });
-  bind('fWin0', v => { c().t_window = [toNum(v), c().t_window ? c().t_window[1] : null]; });
-  bind('fWin1', v => { c().t_window = [c().t_window ? c().t_window[0] : null, toNum(v)]; });
+  const pair = (key, i, v) => {       // 둘 다 비우면 자동으로 돌아간다
+    const r = c()[key] ? c()[key].slice() : [null, null];
+    r[i] = toNum(v);
+    if (r[0] === null && r[1] === null) delete c()[key]; else c()[key] = r;
+  };
+  bind('fBase0', v => pair('baseline', 0, v));
+  bind('fBase1', v => pair('baseline', 1, v));
+  bind('fWin0', v => pair('t_window', 0, v));
+  bind('fWin1', v => pair('t_window', 1, v));
   bind('fUp', v => optional('upstream_len', v));
   bind('fOut', v => optional('outlet_len', v));
-  bind('fStem', v => { c().hose_mm.stem = toNum(v); });
+  bind('fStem', v => {
+    const stem = toNum(v);
+    if (stem === null) { delete c().hose_mm; return; }
+    c().hose_mm = { branches: c().outlets.map(() => stem), ...(c().hose_mm || {}), stem };
+  });
   bind('fBranches', v => {
     const list = v.split(',').map(s => s.trim()).filter(Boolean).map(Number);
     const ok = list.length > 0 && list.every(d => Number.isFinite(d) && d > 0);
-    if (ok) { c().hose_mm.branches = list; delete $('fBranches').dataset.bad; } else $('fBranches').dataset.bad = '1';
+    if (ok && c().hose_mm) { c().hose_mm.branches = list; delete $('fBranches').dataset.bad; }
+    else if (v.trim()) $('fBranches').dataset.bad = '1';
+    else delete $('fBranches').dataset.bad;
   });
   $('fTopo').addEventListener('change', e => { c().topology = e.target.value; fillStructure(); sync(); });
   $('fExit').addEventListener('change', e => { c().exit = e.target.value === 'auto' ? 'auto' : Number(e.target.value); sync(); });
@@ -268,7 +302,10 @@ function wireFields() {
     if (cfg.flow_mL_s) cfg.flow_mL_s.push(null);
     fillPorts(); sync();
   });
-  $('preset').addEventListener('change', e => { if (e.target.value !== 'file') usePreset(e.target.value); });
+  $('preset').addEventListener('change', e => {
+    if (e.target.value === 'file') return;
+    if (e.target.value) usePreset(e.target.value); else useRun(state.cfg.run);
+  });
   $('openCfg').addEventListener('click', () => $('cfgInput').click());
   $('cfgInput').addEventListener('change', async e => {
     const file = e.target.files[0];
@@ -330,7 +367,8 @@ function checkConfig() {
   const coord = p => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite);
   if (!Number.isInteger(c.run)) out.push('Run 번호 입력');
   const span = (r, name) => {
-    if (!r || !Number.isFinite(r[0]) || !Number.isFinite(r[1])) out.push(`${name} 입력`);
+    if (!r) return;                 // 비워 두면 측정값에서 찾는다
+    if (!Number.isFinite(r[0]) || !Number.isFinite(r[1])) out.push(`${name}: 시작과 끝 입력`);
     else if (r[0] >= r[1]) out.push(`${name}: 시작이 끝보다 작아야 함`);
   };
   span(c.baseline, '기준 구간'); span(c.t_window, '분석 구간');
@@ -340,7 +378,7 @@ function checkConfig() {
   }
   if (!coord(c.inlet)) out.push('입구 좌표 입력');
   c.outlets.forEach((p, k) => { if (!coord(p)) out.push(`출구 ${k + 1} 좌표 입력`); });
-  if (!(c.hose_mm.stem > 0) || $('fBranches').dataset.bad) out.push('호스 내경 형식: 5 또는 3, 3');
+  if ((c.hose_mm && !(c.hose_mm.stem > 0)) || $('fBranches').dataset.bad) out.push('호스 내경 형식: 5 또는 3, 3');
   if ((c.flow_mL_s || []).some(q => q !== null && !(q > 0))) out.push('유량은 0보다 커야 함');
   if (document.querySelector('[data-bad-mask]')) out.push('뺄 구간 형식: 69-999, 120-130');
   if (state.columns) {
@@ -731,8 +769,8 @@ async function main() {
   $('importBtn').addEventListener('click', () => $('importInput').click());
   $('importInput').addEventListener('change', e => { if (e.target.files[0]) importResult(e.target.files[0]); e.target.value = ''; });
   state.presets = await (await fetch('configs/index.json')).json();
-  $('preset').replaceChildren(...state.presets.map(p => new Option(p.label, p.id)));
-  await usePreset(state.presets[0].id);
+  $('preset').replaceChildren(new Option('측정값과 유량만으로 복원', ''), ...state.presets.map(p => new Option(p.label, p.id)));
+  await useRun(55);
   await loadResults();
   startPool();
 }
