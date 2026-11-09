@@ -699,15 +699,14 @@ function stop() {
 }
 
 /* ---------- 결과 ---------- */
-/* 예전에 저장한 결과도 지금 3D 화면으로 본다: 결과 HTML 속 자료만 꺼내 새 틀에 넣는다 */
+/* 저장한 결과는 언제나 지금 3D 화면으로 본다: 결과 HTML 속 자료만 꺼내 최신 틀에 넣는다 */
 let viewTemplate = null;
 async function currentView(result) {
   if (result.view) return result.view;
-  const old = !result.html.includes('three@0.170.0');
-  const found = old && result.html.match(/const D = (\{[\s\S]*?\});\nconst css =/);
+  const found = result.html.match(/const D = (\{[\s\S]*?\});\nconst css =/);
   if (!found) return result.html;
   try {
-    if (!viewTemplate) viewTemplate = await (await fetch('engine/template.html')).text();
+    if (!viewTemplate) viewTemplate = await (await fetch('engine/template.html', { cache: 'no-cache' })).text();
     result.view = viewTemplate.replace('__DATA__', () => found[1]);
   } catch (e) { result.view = result.html; }
   return result.view;

@@ -67,7 +67,7 @@ async function start() {
   await py.loadPackage(['numpy', 'scipy'], { messageCallback: () => {}, errorCallback: line });
   py.FS.mkdirTree('/app');
   for (const name of ['recon3d.py', 'grow.py', 'thickness.py', 'template.html']) {
-    const res = await fetch(new URL(`../engine/${name}`, self.location.href));
+    const res = await fetch(new URL(`../engine/${name}`, self.location.href), { cache: 'no-cache' });   // 새로 올린 엔진을 바로 쓴다
     if (!res.ok) throw new Error(`engine/${name} 파일을 불러오지 못함 (HTTP ${res.status})`);
     py.FS.writeFile(`/app/${name}`, new Uint8Array(await res.arrayBuffer()));
   }
