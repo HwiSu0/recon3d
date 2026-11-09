@@ -46,38 +46,78 @@ function wantedColumns(cfg) {
 }
 
 /* ---------- 측정 파일 ---------- */
-/* 연 CSV와 고른 Run을 이 브라우저의 IndexedDB에 둬서, 사이트를 다시 열어도 그대로 쓴다 */
+/* 연 CSV와 고른 Run을 이 브라우저에 둬서 사이트를 다시 열어도 그대로 쓴다.
+   파일 내용은 브라우저 전용 저장소(OPFS)에 복사하고, 안 되면 IndexedDB에 넣는다. 이름과 Run은 IndexedDB에 둔다 */
+const KEEP_NAME = 'last.csv';
+function fileNote(text, bad = false) {
+  const el = $('fileNote');
+  el.hidden = !text; el.textContent = text || ''; el.classList.toggle('bad', bad);
+}
+async function opfs() {
+  if (!navigator.storage || !navigator.storage.getDirectory) return null;
+  try { return await navigator.storage.getDirectory(); } catch (e) { return null; }
+}
 async function keepFile(file, run) {
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  const meta = { key: 'csv', name: file.name, size: file.size, lastModified: file.lastModified, run, time: Date.now() };
+  let why = '';
+  const root = await opfs();
+  if (root) {
+    try {
+      const handle = await root.getFileHandle(KEEP_NAME, { create: true });
+      const out = await handle.createWritable();
+      await out.write(file); await out.close();
+      await store('readwrite', s => s.put({ ...meta, where: 'opfs' }), 'files');
+      return true;
+    } catch (e) { why = e.name || String(e); }
+  }
   try {
-    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-    await store('readwrite', s => s.put({ key: 'csv', file, run, time: Date.now() }), 'files');
-  } catch (e) { /* 저장 공간이 없으면 이번 방문에서만 쓴다 */ }
+    await store('readwrite', s => s.put({ ...meta, where: 'idb', file }), 'files');
+    if (root) root.removeEntry(KEEP_NAME).catch(() => {});
+    return true;
+  } catch (e) { why = why || e.name || String(e); }
+  fileNote(`브라우저에 저장하지 못함 (${why}). 다시 열면 CSV를 또 넣어야 함`, true);
+  return false;
+}
+async function keptRecord() {
+  try { return await store('readonly', s => s.get('csv'), 'files'); } catch (e) { return null; }
 }
 async function keepRun(run) {
-  try {
-    const kept = await store('readonly', s => s.get('csv'), 'files');
-    if (kept && kept.run !== run) await store('readwrite', s => s.put({ ...kept, run }), 'files');
-  } catch (e) {}
+  const kept = await keptRecord();
+  if (kept && kept.run !== run) { try { await store('readwrite', s => s.put({ ...kept, run }), 'files'); } catch (e) {} }
 }
 async function forgetFile() {
   try { await store('readwrite', s => s.delete('csv'), 'files'); } catch (e) {}
+  const root = await opfs();
+  if (root) await root.removeEntry(KEEP_NAME).catch(() => {});
 }
 async function restoreFile() {
-  let kept = null;
-  try { kept = await store('readonly', s => s.get('csv'), 'files'); } catch (e) { return; }
-  if (!kept || !kept.file) return;
+  const kept = await keptRecord();
+  if (!kept) return;
+  let file = null;
+  try {
+    if (kept.where === 'opfs') {
+      const blob = await (await (await opfs()).getFileHandle(KEEP_NAME)).getFile();
+      if (kept.size && blob.size !== kept.size) throw new Error('크기가 다름');
+      file = new File([blob], kept.name, { type: 'text/csv', lastModified: kept.lastModified });
+    } else if (kept.file) file = kept.file;
+  } catch (e) {
+    fileNote(`지난번 파일(${kept.name})을 불러오지 못함. CSV를 다시 열어 주세요`, true);
+    return;
+  }
+  if (!file) return;
   if (kept.run) await useRun(kept.run);
-  await setFile(kept.file, true);
+  await setFile(file, true);
 }
 
 async function setFile(file, restored = false) {
-  clearError();
+  clearError(); fileNote('');
   let columns;
   try { columns = await readColumns(file); } catch (e) { columns = new Map(); }
   if (!columns.size) {
     state.file = null; state.columns = null;
     $('fileInfo').textContent = '파일 없음'; $('closeCsv').hidden = true;
-    if (restored) forgetFile();
+    if (restored) fileNote(`지난번 파일(${file.name})을 읽지 못함. CSV를 다시 열어 주세요`, true);
     else showError(`${file.name}: Run 열 없음. Capstone에서 내보낸 CSV 필요`);
     fillRun(); validate();
     return;
@@ -87,8 +127,13 @@ async function setFile(file, restored = false) {
   $('fileInfo').textContent = `${file.name} (${runLabel(columns)})`;
   $('fileInfo').title = `${file.name}, ${(file.size / 1e6).toFixed(1)} MB${restored ? ', 지난번에 연 파일' : ''}`;
   $('closeCsv').hidden = false;
-  if (!columns.has(state.cfg.run)) await useRun(Math.max(...columns.keys()));
-  if (!restored) keepFile(file, state.cfg.run);
+  // 새로 연 파일은 가장 마지막 Run부터, 되살린 파일은 지난번에 고른 Run 그대로
+  if (!restored || !columns.has(state.cfg.run)) await useRun(Math.max(...columns.keys()));
+  if (restored) fileNote('지난번에 연 파일');
+  else {
+    fileNote('브라우저에 저장하는 중');
+    keepFile(file, state.cfg.run).then(ok => { if (ok && state.file === file) fileNote('브라우저에 저장됨. 다시 열어도 남음'); });
+  }
   state.table = null;
   fillRun(); sync();
   startPool();
@@ -97,7 +142,7 @@ async function setFile(file, restored = false) {
 function closeFile() {
   state.file = null; state.columns = null; state.table = null;
   $('fileInfo').textContent = '파일 없음'; $('fileInfo').title = ''; $('closeCsv').hidden = true;
-  forgetFile();
+  fileNote(''); forgetFile();
   fillRun(); validate();
 }
 
