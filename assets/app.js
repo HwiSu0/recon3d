@@ -46,29 +46,65 @@ function wantedColumns(cfg) {
 }
 
 /* ---------- 측정 파일 ---------- */
-async function setFile(file) {
+/* 연 CSV와 고른 Run을 이 브라우저의 IndexedDB에 둬서, 사이트를 다시 열어도 그대로 쓴다 */
+async function keepFile(file, run) {
+  try {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    await store('readwrite', s => s.put({ key: 'csv', file, run, time: Date.now() }), 'files');
+  } catch (e) { /* 저장 공간이 없으면 이번 방문에서만 쓴다 */ }
+}
+async function keepRun(run) {
+  try {
+    const kept = await store('readonly', s => s.get('csv'), 'files');
+    if (kept && kept.run !== run) await store('readwrite', s => s.put({ ...kept, run }), 'files');
+  } catch (e) {}
+}
+async function forgetFile() {
+  try { await store('readwrite', s => s.delete('csv'), 'files'); } catch (e) {}
+}
+async function restoreFile() {
+  let kept = null;
+  try { kept = await store('readonly', s => s.get('csv'), 'files'); } catch (e) { return; }
+  if (!kept || !kept.file) return;
+  if (kept.run) await useRun(kept.run);
+  await setFile(kept.file, true);
+}
+
+async function setFile(file, restored = false) {
   clearError();
-  const columns = await readColumns(file);
+  let columns;
+  try { columns = await readColumns(file); } catch (e) { columns = new Map(); }
   if (!columns.size) {
     state.file = null; state.columns = null;
-    $('fileInfo').textContent = '파일 없음';
-    showError(`${file.name}: Run 열 없음. Capstone에서 내보낸 CSV 필요`);
+    $('fileInfo').textContent = '파일 없음'; $('closeCsv').hidden = true;
+    if (restored) forgetFile();
+    else showError(`${file.name}: Run 열 없음. Capstone에서 내보낸 CSV 필요`);
     fillRun(); validate();
     return;
   }
   state.file = file;
   state.columns = columns;
   $('fileInfo').textContent = `${file.name} (${runLabel(columns)})`;
-  $('fileInfo').title = `${file.name}, ${(file.size / 1e6).toFixed(1)} MB`;
+  $('fileInfo').title = `${file.name}, ${(file.size / 1e6).toFixed(1)} MB${restored ? ', 지난번에 연 파일' : ''}`;
+  $('closeCsv').hidden = false;
   if (!columns.has(state.cfg.run)) await useRun(Math.max(...columns.keys()));
+  if (!restored) keepFile(file, state.cfg.run);
   state.table = null;
   fillRun(); sync();
   startPool();
 }
 
+function closeFile() {
+  state.file = null; state.columns = null; state.table = null;
+  $('fileInfo').textContent = '파일 없음'; $('fileInfo').title = ''; $('closeCsv').hidden = true;
+  forgetFile();
+  fillRun(); validate();
+}
+
 function wireFile() {
   const panel = document.querySelector('aside');
   $('openCsv').addEventListener('click', () => $('csvInput').click());
+  $('closeCsv').addEventListener('click', closeFile);
   $('csvInput').addEventListener('change', e => { if (e.target.files[0]) setFile(e.target.files[0]); e.target.value = ''; });
   for (const ev of ['dragenter', 'dragover']) document.addEventListener(ev, e => { e.preventDefault(); panel.classList.add('over'); });
   document.addEventListener('dragleave', e => { if (!e.relatedTarget) panel.classList.remove('over'); });
@@ -258,7 +294,7 @@ function wireFields() {
   const bind = (id, apply) => $(id).addEventListener('input', e => { apply(e.target.value); sync(); });
   const optional = (key, v) => { const n = toNum(v); if (n === null) delete c()[key]; else c()[key] = n; };
   bind('fRun', v => { c().run = toNum(v); });
-  $('fRunSel').addEventListener('change', async e => { await useRun(Number(e.target.value)); state.table = null; fillRun(); sync(); });
+  $('fRunSel').addEventListener('change', async e => { await useRun(Number(e.target.value)); state.table = null; fillRun(); sync(); keepRun(state.cfg.run); });
   bind('fFront', v => optional('t_front_guess', v));
   const pair = (key, i, v) => {       // 둘 다 비우면 자동으로 돌아간다
     const r = c()[key] ? c()[key].slice() : [null, null];
@@ -632,17 +668,21 @@ function showResult(result) {
 /* 저장된 결과: 이 브라우저의 IndexedDB에 둔다. 쓸 수 없으면 새로고침 전까지만 목록에 남는다 */
 function openDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('recon3d', 1);
-    req.onupgradeneeded = () => req.result.createObjectStore('results', { keyPath: 'id', autoIncrement: true });
+    const req = indexedDB.open('recon3d', 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('results')) db.createObjectStore('results', { keyPath: 'id', autoIncrement: true });
+      if (!db.objectStoreNames.contains('files')) db.createObjectStore('files', { keyPath: 'key' });
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
-async function store(mode, work) {
+async function store(mode, work, name = 'results') {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction('results', mode);
-    const req = work(tx.objectStore('results'));
+    const tx = db.transaction(name, mode);
+    const req = work(tx.objectStore(name));
     tx.oncomplete = () => { db.close(); resolve(req.result); };
     tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
   });
@@ -773,6 +813,7 @@ async function main() {
   $('preset').replaceChildren(new Option('측정값과 유량만으로 복원', ''), ...state.presets.map(p => new Option(p.label, p.id)));
   await useRun(55);
   await loadResults();
+  await restoreFile();
   startPool();
 }
 main();
