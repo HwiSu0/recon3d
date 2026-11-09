@@ -699,13 +699,27 @@ function stop() {
 }
 
 /* ---------- 결과 ---------- */
-function showResult(result) {
+/* 예전에 저장한 결과도 지금 3D 화면으로 본다: 결과 HTML 속 자료만 꺼내 새 틀에 넣는다 */
+let viewTemplate = null;
+async function currentView(result) {
+  if (result.view) return result.view;
+  const old = !result.html.includes('three@0.170.0');
+  const found = old && result.html.match(/const D = (\{[\s\S]*?\});\nconst css =/);
+  if (!found) return result.html;
+  try {
+    if (!viewTemplate) viewTemplate = await (await fetch('engine/template.html')).text();
+    result.view = viewTemplate.replace('__DATA__', () => found[1]);
+  } catch (e) { result.view = result.html; }
+  return result.view;
+}
+
+async function showResult(result) {
   state.result = result;
   $('saveHtml').hidden = !result;
   $('saveJson').hidden = !result;
   $('empty').hidden = !!result;
   $('viewer').hidden = !result;
-  if (result) $('viewer').srcdoc = result.html;
+  if (result) { const html = await currentView(result); if (state.result === result) $('viewer').srcdoc = html; }
   else $('viewer').removeAttribute('srcdoc');
   renderList();
 }
@@ -848,7 +862,7 @@ async function main() {
   $('runBtn').addEventListener('click', run);
   $('stopBtn').addEventListener('click', stop);
   const fileName = () => `recon_run${state.result.run || 'result'}`;
-  $('saveHtml').addEventListener('click', () => save(`${fileName()}.html`, state.result.html, 'text/html'));
+  $('saveHtml').addEventListener('click', async () => save(`${fileName()}.html`, await currentView(state.result), 'text/html'));
   $('saveJson').addEventListener('click', () => save(`${fileName()}.json`, state.result.json, 'application/json'));
   $('tabForm').addEventListener('click', () => setTab(false));
   $('tabList').addEventListener('click', () => setTab(true));

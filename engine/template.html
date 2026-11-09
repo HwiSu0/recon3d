@@ -4,26 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>통로 3D 복원</title>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
 <style>
 :root{
   --bg:#fff; --panel:#fff; --ink:#1c1c1c; --muted:#767676; --line:#e3e3e3; --grid:#efefef;
-  --scene:#e8e8e8; --b1:#2463c9; --b2:#d2691e; --b3:#2e8b57; --stem:#3b3a36; --truth:#2f9e57; --sensor:#7a3fb0;
+  --scene:#d8dbde; --b1:#2463c9; --b2:#d2691e; --b3:#2e8b57; --stem:#3b3a36; --truth:#2f9e57; --sensor:#7a3fb0;
   --c0:#1c1c1c; --c1:#2463c9; --c2:#d2691e; --good:#1c1c1c; --bad:#b3261e;
-  --label-bg:rgba(255,255,255,.85); --label-ink:#1c1c1c;
+  --label-bg:rgba(255,255,255,.9); --label-ink:#1c1c1c;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
     --bg:#161616; --panel:#161616; --ink:#e6e6e6; --muted:#939393; --line:#2e2e2e; --grid:#242424;
-    --scene:#1e1e1e; --b1:#6ea0ff; --b2:#f0954a; --b3:#5cc48c; --stem:#d6d4cc; --truth:#5cc48c; --sensor:#c08cf0;
+    --scene:#1d1f22; --b1:#6ea0ff; --b2:#f0954a; --b3:#5cc48c; --stem:#d6d4cc; --truth:#5cc48c; --sensor:#c08cf0;
     --c0:#e6e6e6; --c1:#6ea0ff; --c2:#f0954a; --good:#e6e6e6; --bad:#f28b82;
-    --label-bg:rgba(24,24,24,.85); --label-ink:#e6e6e6;
+    --label-bg:rgba(28,29,32,.88); --label-ink:#e6e6e6;
   }
 }
 :root[data-theme="dark"]{
   --bg:#161616; --panel:#161616; --ink:#e6e6e6; --muted:#939393; --line:#2e2e2e; --grid:#242424;
-  --scene:#1e1e1e; --b1:#6ea0ff; --b2:#f0954a; --b3:#5cc48c; --stem:#d6d4cc; --truth:#5cc48c; --sensor:#c08cf0;
+  --scene:#1d1f22; --b1:#6ea0ff; --b2:#f0954a; --b3:#5cc48c; --stem:#d6d4cc; --truth:#5cc48c; --sensor:#c08cf0;
   --c0:#e6e6e6; --c1:#6ea0ff; --c2:#f0954a; --good:#e6e6e6; --bad:#f28b82;
-  --label-bg:rgba(24,24,24,.85); --label-ink:#e6e6e6;
+  --label-bg:rgba(28,29,32,.88); --label-ink:#e6e6e6;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif}
@@ -40,10 +41,18 @@ section:last-child{border-bottom:0}
 #stage:active{cursor:grabbing}
 #gl{width:100%;height:100%;display:block}
 #labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
-.lb{position:absolute;transform:translate(-50%,-140%);white-space:nowrap;font-size:11px;line-height:1.3;padding:1px 4px;border-radius:2px;background:var(--label-bg);color:var(--label-ink)}
+.lb{--lift:0px;position:absolute;transform:translate(-50%,calc(-100% - 12px - var(--lift)));white-space:nowrap;font-size:11px;line-height:1.25;padding:2px 6px;border-radius:3px;background:var(--label-bg);color:var(--label-ink);box-shadow:0 1px 3px rgba(0,0,0,.16),0 0 0 .5px rgba(0,0,0,.08);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+.lb::after{content:"";position:absolute;left:50%;top:100%;width:1px;height:calc(9px + var(--lift));background:currentColor;opacity:.4}
+.lb::before{content:"";position:absolute;left:calc(50% - 2px);top:calc(100% + 8px + var(--lift));width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.75}
+.lb.below{transform:translate(-50%,calc(12px + var(--lift)))}
+.lb.below::after{top:auto;bottom:100%}
+.lb.below::before{top:auto;bottom:calc(100% + 8px + var(--lift))}
 .lb.key{font-weight:600}
+#stage::after{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at 50% 42%,transparent 55%,rgba(0,0,0,.10) 100%)}
+#labels{z-index:1}
 .lb small{color:var(--muted);font-weight:400}
 #nogl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);text-align:center;padding:20px}
+#nogl[hidden]{display:none}
 #view{width:100%;height:auto;aspect-ratio:4/3;display:block}
 #view[hidden]{display:none}
 .ctrl{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;padding:6px 12px;border-top:1px solid var(--line)}
@@ -202,12 +211,366 @@ const Wd = d => [d[0], d[2], -d[1]];
 const hex2rgb = h => { h = h.replace('#', ''); if (h.length === 3) h = h.split('').map(x => x + x).join(''); const n = parseInt(h, 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
 const cssRGB = n => hex2rgb(css(n) || '#888888');
 
-// ---------- 3D (WebGL) ----------
+// ---------- 3D: 공통 모양 ----------
 const canvas = document.getElementById('gl');
-const gl = canvas.getContext('webgl', { antialias: true, alpha: false, premultipliedAlpha: false }) || canvas.getContext('experimental-webgl');
-if (!gl) startFallback(); else start3D();
+const pushV = (o, p, n) => { o.push(p[0], p[1], p[2], n[0], n[1], n[2]); };
+function quad(o, a, b, c, d, n) { pushV(o, a, n); pushV(o, b, n); pushV(o, c, n); pushV(o, a, n); pushV(o, c, n); pushV(o, d, n); }
 
+// ---- 관 (parallel transport frame) ----
+function tube(pts, r, seg = 20, caps = true) {
+  const o = [], nP = pts.length; if (nP < 2) return o;
+  const T = pts.map((p, i) => V3.norm(V3.sub(pts[Math.min(i + 1, nP - 1)], pts[Math.max(i - 1, 0)])));
+  let N = V3.norm(V3.cross(T[0], Math.abs(T[0][1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]));
+  const rings = [];
+  for (let i = 0; i < nP; i++) {
+    if (i > 0) { N = V3.norm(V3.sub(N, V3.mul(T[i], V3.dot(N, T[i])))); }
+    const B = V3.cross(T[i], N); const ring = [];
+    for (let j = 0; j <= seg; j++) { const th = 2 * Math.PI * j / seg; const d = V3.add(V3.mul(N, Math.cos(th)), V3.mul(B, Math.sin(th))); ring.push([V3.add(pts[i], V3.mul(d, r)), d]); }
+    rings.push(ring);
+  }
+  for (let i = 0; i < nP - 1; i++) for (let j = 0; j < seg; j++) {
+    const a = rings[i][j], b = rings[i + 1][j], c = rings[i + 1][j + 1], d = rings[i][j + 1];
+    pushV(o, a[0], a[1]); pushV(o, b[0], b[1]); pushV(o, c[0], c[1]); pushV(o, a[0], a[1]); pushV(o, c[0], c[1]); pushV(o, d[0], d[1]);
+  }
+  if (caps) for (const [i, s] of [[0, -1], [nP - 1, 1]]) {
+    const n = V3.mul(T[i], s);
+    for (let j = 0; j < seg; j++) { pushV(o, pts[i], n); pushV(o, rings[i][j][0], n); pushV(o, rings[i][j + 1][0], n); }
+  }
+  return o;
+}
+function cyl(p0, p1, r0, r1, seg = 24, caps = true) {
+  const o = []; const ax = V3.norm(V3.sub(p1, p0)); const L = V3.len(V3.sub(p1, p0));
+  const N = V3.norm(V3.cross(ax, Math.abs(ax[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])); const B = V3.cross(ax, N);
+  const slope = (r0 - r1) / Math.max(L, 1e-6);
+  for (let j = 0; j < seg; j++) {
+    const t0 = 2 * Math.PI * j / seg, t1 = 2 * Math.PI * (j + 1) / seg;
+    const d0 = V3.add(V3.mul(N, Math.cos(t0)), V3.mul(B, Math.sin(t0))), d1 = V3.add(V3.mul(N, Math.cos(t1)), V3.mul(B, Math.sin(t1)));
+    const n0 = V3.norm(V3.add(d0, V3.mul(ax, slope))), n1 = V3.norm(V3.add(d1, V3.mul(ax, slope)));
+    const a = V3.add(p0, V3.mul(d0, r0)), b = V3.add(p1, V3.mul(d0, r1)), c = V3.add(p1, V3.mul(d1, r1)), d = V3.add(p0, V3.mul(d1, r0));
+    pushV(o, a, n0); pushV(o, b, n0); pushV(o, c, n1); pushV(o, a, n0); pushV(o, c, n1); pushV(o, d, n1);
+    if (caps) { const m0 = V3.mul(ax, -1); pushV(o, p0, m0); pushV(o, d, m0); pushV(o, a, m0); pushV(o, p1, ax); pushV(o, b, ax); pushV(o, c, ax); }
+  }
+  return o;
+}
+function ellip(c, ax3, seg = 24) {           // ax3: 세 축 벡터(길이 = 반지름)
+  const o = []; const n2 = ax3.map(a => Math.max(V3.dot(a, a), 1e-6));
+  const P2 = (i, j) => { const th = Math.PI * i / seg, ph = 2 * Math.PI * j / seg; const u = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)];
+    let p = c, n = [0, 0, 0]; for (let k = 0; k < 3; k++) { p = V3.add(p, V3.mul(ax3[k], u[k])); n = V3.add(n, V3.mul(ax3[k], u[k] / n2[k])); }
+    return [p, V3.norm(n)]; };
+  for (let i = 0; i < seg; i++) for (let j = 0; j < seg; j++) {
+    const a = P2(i, j), b = P2(i + 1, j), cc = P2(i + 1, j + 1), d = P2(i, j + 1);
+    pushV(o, a[0], a[1]); pushV(o, b[0], b[1]); pushV(o, cc[0], cc[1]); pushV(o, a[0], a[1]); pushV(o, cc[0], cc[1]); pushV(o, d[0], d[1]);
+  }
+  return o;
+}
+function sphere(c, r, seg = 20) {
+  const o = [];
+  const P2 = (i, j) => { const th = Math.PI * i / seg, ph = 2 * Math.PI * j / seg; const n = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)]; return [V3.add(c, V3.mul(n, r)), n]; };
+  for (let i = 0; i < seg; i++) for (let j = 0; j < seg; j++) {
+    const a = P2(i, j), b = P2(i + 1, j), cc = P2(i + 1, j + 1), d = P2(i, j + 1);
+    pushV(o, a[0], a[1]); pushV(o, b[0], b[1]); pushV(o, cc[0], cc[1]); pushV(o, a[0], a[1]); pushV(o, cc[0], cc[1]); pushV(o, d[0], d[1]);
+  }
+  return o;
+}
+function torus(c, ax, R, r, su = 72, sv = 16) {
+  ax = V3.norm(ax); const N = V3.norm(V3.cross(ax, Math.abs(ax[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])); const B = V3.cross(ax, N); const o = [];
+  const P2 = (i, j) => { const t = 2 * Math.PI * i / su, s = 2 * Math.PI * j / sv; const radial = V3.add(V3.mul(N, Math.cos(t)), V3.mul(B, Math.sin(t)));
+    const n = V3.add(V3.mul(radial, Math.cos(s)), V3.mul(ax, Math.sin(s))); return [V3.add(V3.add(c, V3.mul(radial, R)), V3.mul(n, r)), n]; };
+  for (let i = 0; i < su; i++) for (let j = 0; j < sv; j++) {
+    const a = P2(i, j), b = P2(i + 1, j), cc = P2(i + 1, j + 1), d = P2(i, j + 1);
+    pushV(o, a[0], a[1]); pushV(o, b[0], b[1]); pushV(o, cc[0], cc[1]); pushV(o, a[0], a[1]); pushV(o, cc[0], cc[1]); pushV(o, d[0], d[1]);
+  }
+  return o;
+}
+function boxM(lo, hi) {
+  const o = []; const [x0, y0, z0] = lo, [x1, y1, z1] = hi;
+  quad(o, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1]); quad(o, [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1]);
+  quad(o, [x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0]); quad(o, [x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0]);
+  quad(o, [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0]); quad(o, [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0]);
+  return o;
+}
+// 벽 한 장 (k축 방향 두께, 구멍 뚫림)
+function wall(k, k0, k1, lo, hi, holes, res) {
+  const o = [], rim = []; const iu = (k + 1) % 3, iv = (k + 2) % 3;
+  const P3 = (kk, uu, vv) => { const p = [0, 0, 0]; p[k] = kk; p[iu] = uu; p[iv] = vv; return p; };
+  const nk = [0, 0, 0]; nk[k] = 1; const nkm = [0, 0, 0]; nkm[k] = -1;
+  const u0 = lo[iu], u1 = hi[iu], v0 = lo[iv], v1 = hi[iv];
+  if (!holes.length) { quad(o, P3(k1, u0, v0), P3(k1, u1, v0), P3(k1, u1, v1), P3(k1, u0, v1), nk); quad(o, P3(k0, u0, v0), P3(k0, u0, v1), P3(k0, u1, v1), P3(k0, u1, v0), nkm); }
+  else {
+    const nu = Math.ceil((u1 - u0) / res), nv = Math.ceil((v1 - v0) / res), du = (u1 - u0) / nu, dv = (v1 - v0) / nv;
+    for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
+      const ua = u0 + i * du, va = v0 + j * dv, uc = ua + du / 2, vc = va + dv / 2;
+      if (holes.some(h => Math.hypot(uc - h.u, vc - h.v) < h.r)) continue;
+      quad(o, P3(k1, ua, va), P3(k1, ua + du, va), P3(k1, ua + du, va + dv), P3(k1, ua, va + dv), nk);
+      quad(o, P3(k0, ua, va), P3(k0, ua, va + dv), P3(k0, ua + du, va + dv), P3(k0, ua + du, va), nkm);
+    }
+    holes.forEach(h => rim.push(...cyl(P3(k0, h.u, h.v), P3(k1, h.u, h.v), h.r, h.r, 28, false)));
+  }
+  const nu_ = [0, 0, 0]; nu_[iu] = 1; const nv_ = [0, 0, 0]; nv_[iv] = 1;
+  quad(rim, P3(k0, u0, v0), P3(k1, u0, v0), P3(k1, u0, v1), P3(k0, u0, v1), V3.mul(nu_, -1));
+  quad(rim, P3(k0, u1, v0), P3(k0, u1, v1), P3(k1, u1, v1), P3(k1, u1, v0), nu_);
+  quad(rim, P3(k0, u0, v0), P3(k0, u1, v0), P3(k1, u1, v0), P3(k1, u0, v0), V3.mul(nv_, -1));
+  quad(rim, P3(k0, u0, v1), P3(k1, u0, v1), P3(k1, u1, v1), P3(k0, u1, v1), nv_);
+  return [o, rim];
+}
+// 꺾인 점을 둥글게
+function smooth(nodes, R, step) {
+  const pts = [nodes[0]];
+  if (nodes.length > 6) pts.push(...nodes.slice(1, -1));   // 이미 곡선으로 계산된 경로
+  else for (let i = 1; i < nodes.length - 1; i++) {
+    const a = nodes[i - 1], p = nodes[i], b = nodes[i + 1];
+    const l1 = V3.len(V3.sub(p, a)), l2 = V3.len(V3.sub(b, p)); if (l1 < 1e-6 || l2 < 1e-6) continue;
+    const u1 = V3.mul(V3.sub(p, a), 1 / l1), u2 = V3.mul(V3.sub(b, p), 1 / l2);
+    const r = Math.min(R, l1 * 0.45, l2 * 0.45); const s = V3.sub(p, V3.mul(u1, r)), e = V3.add(p, V3.mul(u2, r));
+    pts.push(s); for (let q = 1; q < 10; q++) { const t = q / 10; pts.push(V3.add(V3.add(V3.mul(s, (1 - t) * (1 - t)), V3.mul(p, 2 * t * (1 - t))), V3.mul(e, t * t))); } pts.push(e);
+  }
+  pts.push(nodes[nodes.length - 1]);
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i], L = V3.len(V3.sub(b, a)); if (L < 1e-5) continue;
+    const n = Math.max(1, Math.ceil(L / step)); for (let q = 1; q <= n; q++) out.push(V3.add(a, V3.mul(V3.sub(b, a), q / n)));
+  }
+  return out;
+}
+function dashes(pts, on, off) {      // 점선 관 조각들
+  const out = []; let acc = 0, cur = [pts[0]], drawing = true;
+  for (let i = 1; i < pts.length; i++) {
+    acc += V3.len(V3.sub(pts[i], pts[i - 1]));
+    if (drawing) cur.push(pts[i]);
+    if (drawing && acc >= on) { if (cur.length > 1) out.push(cur); drawing = false; acc = 0; }
+    else if (!drawing && acc >= off) { drawing = true; acc = 0; cur = [pts[i]]; }
+  }
+  if (drawing && cur.length > 1) out.push(cur);
+  return out;
+}
+
+// ---------- 장면 만들기 (두 그리기 방식이 함께 씀) ----------
+// api.mesh(삼각형, 재질, 묶음), api.lines(선분, 재질, 묶음). api.ground, api.coil, api.sensor가 있으면 그쪽이 실제 모양을 만든다.
+// 재질의 kind는 실제 물체 이름이다: acrylic, acrylicRim, edge, slurry, silicone, fitting, reducer, glow, marker, fog, truth, alt
+const dark = matchMedia('(prefers-color-scheme: dark)').matches && document.documentElement.dataset.theme !== 'light' || document.documentElement.dataset.theme === 'dark';
+function buildScene(api) {
+  const addMesh = api.mesh, addLines = api.lines;
+  const BO = G.box_outer || { a: D.box.a, b: D.box.b, c: D.box.c }, wT = G.wall || 0.5;
+  const lo = W([BO.a[0], BO.b[1], BO.c[0]]), hi = W([BO.a[1], BO.b[0], BO.c[1]]);   // z = -b 이므로 b의 큰 값이 z의 작은 값
+  const center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+  const labels = [];
+  const addLabel = (p, html, color, key, group, below) => labels.push({ p, html, color, key, group: group || 'lab', below });
+  const tableY = 0;
+
+  // 센서: 상자 면에 붙어 있으면 몸체는 면 바깥에, 끝은 구멍을 지나 잰 자리까지
+  const sensors = Object.entries(D.sensors).map(([k, p]) => {
+    const c = W(p); let best = null;
+    for (let ax = 0; ax < 3; ax++) for (const [side, v] of [[-1, lo[ax]], [1, hi[ax]]]) {
+      const inside = [0, 1, 2].every(j => j === ax || (c[j] > lo[j] - 0.3 && c[j] < hi[j] + 0.3));
+      const d = Math.abs(c[ax] - v);
+      if (inside && d < 0.8 && (!best || d < best.d)) best = { ax, side, v, d };
+    }
+    const dims = [2.2, 3.0, 3.0];
+    if (!best) { dims[1] = 1.3; return { k, c, body: c, dims, n: null, face: null }; }
+    const n = [0, 0, 0]; n[best.ax] = best.side;
+    if (best.ax === 0) dims[2] = 2.2;
+    dims[best.ax] = 1.3;
+    const face = c.slice(); face[best.ax] = best.v;
+    return { k, c, n, dims, face, ax: best.ax, body: V3.add(face, V3.mul(n, dims[best.ax] / 2)) };
+  });
+
+  if (api.ground) api.ground({ center, lo, hi, tableY });
+  else {
+    addMesh(boxM([center[0] - 30, tableY - 1.2, center[2] - 30], [center[0] + 30, tableY, center[2] + 30]), { col: dark ? [0.22, 0.22, 0.23] : [0.84, 0.83, 0.80], spec: 0.05, shin: 8 });
+    const g = []; for (let x = Math.floor(center[0] - 14); x <= center[0] + 14; x++) g.push(x, tableY + 0.01, center[2] - 14, x, tableY + 0.01, center[2] + 14);
+    for (let z = Math.floor(center[2] - 14); z <= center[2] + 14; z++) g.push(center[0] - 14, tableY + 0.01, z, center[0] + 14, tableY + 0.01, z);
+    addLines(g, { col: dark ? [0.32, 0.32, 0.34] : [0.70, 0.69, 0.66], alpha: 0.6 });
+    if (lo[1] > 2) addMesh(boxM([lo[0] + 0.6, tableY, lo[2] + 0.6], [hi[0] - 0.6, lo[1] - 0.01, hi[2] - 0.6]), { col: dark ? [0.80, 0.80, 0.78] : [0.97, 0.97, 0.95], spec: 0.02, shin: 4 });
+  }
+
+  // 아크릴 상자 (벽 6장 + 호스 구멍 + 센서 구멍)
+  const holeR = (G.hole_mm || 6.5) / 20;
+  const holesW = [D.inlet, ...(D.all_outlets || D.outlets)].map(p => W(p));
+  const faces = [
+    { k: 0, k0: lo[0], k1: lo[0] + wT, s: -1 }, { k: 0, k0: hi[0] - wT, k1: hi[0], s: 1 },
+    { k: 1, k0: lo[1], k1: lo[1] + wT, s: -1 }, { k: 1, k0: hi[1] - wT, k1: hi[1], s: 1 },
+    { k: 2, k0: lo[2], k1: lo[2] + wT, s: -1 }, { k: 2, k0: hi[2] - wT, k1: hi[2], s: 1 }];
+  faces.forEach(f => {
+    const iu = (f.k + 1) % 3, iv = (f.k + 2) % 3;
+    const hs = holesW.filter(p => Math.abs(p[f.k] - (f.k0 + f.k1) / 2) < wT * 1.5).map(p => ({ u: p[iu], v: p[iv], r: holeR }));
+    sensors.forEach(s => { if (s.n && s.ax === f.k && s.n[f.k] === f.s) hs.push({ u: s.c[iu], v: s.c[iv], r: 0.36 }); });
+    const [o, rim] = wall(f.k, f.k0, f.k1, lo, hi, hs, 0.1);
+    addMesh(o, { kind: 'acrylic', col: [0.82, 0.92, 1.0], alpha: 0.10, fres: 0.55, spec: 0.9, shin: 120, transparent: true }, 'box');
+    addMesh(rim, { kind: 'acrylicRim', col: [0.75, 0.88, 1.0], alpha: 0.32, fres: 0.4, spec: 0.8, shin: 90, transparent: true }, 'box');
+  });
+  { const [x0, y0, z0] = lo, [x1, y1, z1] = hi; const e = [];
+    const E = (a, b) => e.push(...a, ...b);
+    E([x0, y0, z0], [x1, y0, z0]); E([x0, y1, z0], [x1, y1, z0]); E([x0, y0, z1], [x1, y0, z1]); E([x0, y1, z1], [x1, y1, z1]);
+    E([x0, y0, z0], [x0, y1, z0]); E([x1, y0, z0], [x1, y1, z0]); E([x0, y0, z1], [x0, y1, z1]); E([x1, y0, z1], [x1, y1, z1]);
+    E([x0, y0, z0], [x0, y0, z1]); E([x1, y0, z0], [x1, y0, z1]); E([x0, y1, z0], [x0, y1, z1]); E([x1, y1, z0], [x1, y1, z1]);
+    addLines(e, { kind: 'edge', col: dark ? [0.62, 0.74, 0.86] : [0.35, 0.50, 0.65], alpha: 0.9 }, 'box'); }
+
+  // 코일
+  (G.coils || []).forEach(c => {
+    const ab = G.coil_axis_bc || [4, 16.5]; const cw = W([c.a, ab[0], ab[1]]);
+    if (api.coil) api.coil(cw, c.R, tableY);
+    else addMesh(torus(cw, [1, 0, 0], c.R, 0.9), { col: [0.72, 0.42, 0.22], spec: 0.7, shin: 50 }, 'coil');
+    addLabel(V3.add(cw, [0, c.R + 1.6, 0]), c.name, null, false, 'coil');
+  });
+
+  // 호스 (복원 결과)
+  const wallH = (G.hose_wall_mm || 1) / 10;
+  const rIn = d => d / 20, rOut = d => d / 20 + wallH;
+  const upD = Wd(G.up_dir || [-1, 0, 0]), outD = Wd(G.out_dir || [1, 0, 0]), Lout = G.outlet_len || 18;
+  const pieceCol = i => GRAPH ? (i >= 10 ? cssRGB(i === 10 ? '--b3' : '--sensor') : cssRGB(i % 2 === 0 ? '--b1' : '--b2')) : STEP ? cssRGB(i === 0 ? '--b1' : '--b2') : nb >= 2 ? ((i === 0 || (LOOP && i === 3)) ? [0.80, 0.80, 0.84] : cssRGB(brCol[(i - 1) % 3])) : cssRGB('--b1');
+  const best = D.best.map(pl => pl.map(W));
+  const inletW = W(D.inlet), outsW = D.outlets.map(W);
+  const bez = (a, b, c, d, n) => Array.from({ length: n }, (_, q) => { const t = q / (n - 1), s = 1 - t;
+    return [0, 1, 2].map(j => s * s * s * a[j] + 3 * s * s * t * b[j] + 3 * s * t * t * c[j] + t * t * t * d[j]); });
+  // 상자 밖 호스: 입구 쪽은 위에 있는 주사기에서 내려오고, 출구 쪽은 탁자로 늘어져 메스실린더로 간다
+  const inTail = () => {
+    const far = V3.add(V3.add(inletW, V3.mul(upD, 7)), [0, 3.5, 0]);
+    return bez(far, V3.add(V3.add(inletW, V3.mul(upD, 5)), [0, 0.6, 0]), V3.add(inletW, V3.mul(upD, 2.2)), inletW, 16).slice(0, -1);
+  };
+  const outTail = o => {
+    const g = tableY + rOut(hoseMM.stem) + 0.02, at = (s, y) => { const p = V3.add(o, V3.mul(outD, s)); return [p[0], y === undefined ? p[1] : y, p[2]]; };
+    const drop = Math.max(2.5, Math.min(9, (o[1] - g) * 0.8));
+    return [...bez(o, at(3.2), at(drop - 1.5, g), at(drop + 1.5, g), 18).slice(1), at(Math.max(Lout, drop + 3), g)];
+  };
+  function hosePieces(paths) {        // 각 조각: {nodes, d, i}
+    const out = [];
+    if (GRAPH) {
+      const P = D.pieces || [], last = P.length ? P[P.length - 1].sec : 0;
+      P.forEach(pc => {
+        let nodes = pc.nodes.map(W);
+        if (pc.sec === 0) nodes = [...inTail(), ...nodes];
+        if (pc.sec === last && pc.role === 'tube') nodes = [...nodes, ...outTail(nodes[nodes.length - 1])];
+        out.push({ nodes, d: pc.d || hoseMM.stem, i: pc.role === 'branch' ? 10 + pc.k : pc.sec });
+      });
+      if (P.length && P[P.length - 1].role === 'branch') { const o = outsW[0]; out.push({ nodes: [o, ...outTail(o)], d: hoseMM.stem, i: last }); }
+      return out;
+    }
+    if (STEP) {
+      out.push({ nodes: [...inTail(), ...paths[0]], d: hoseMM.stem, i: 0 });
+      const l2 = paths[1]; out.push({ nodes: [...l2, ...outTail(l2[l2.length - 1])], d: hoseMM.branches[0] || hoseMM.stem, i: 1 });
+    } else if (LOOP) {
+      const mg = paths[3];
+      out.push({ nodes: [...inTail(), ...paths[0]], d: hoseMM.stem, i: 0 });
+      for (let k = 0; k < 2; k++) out.push({ nodes: paths[k + 1], d: hoseMM.branches[k] || hoseMM.stem, i: k + 1 });
+      out.push({ nodes: [...mg, ...outTail(mg[mg.length - 1])], d: hoseMM.stem, i: 3 });
+    } else if (nb === 1) {
+      out.push({ nodes: [...inTail(), ...paths[0], ...outTail(paths[0][paths[0].length - 1])], d: hoseMM.stem, i: 1 });
+    } else {
+      out.push({ nodes: [...inTail(), ...paths[0]], d: hoseMM.stem, i: 0 });
+      for (let k = 0; k < nb; k++) { const pl = paths[k + 1]; out.push({ nodes: [...pl, ...outTail(pl[pl.length - 1])], d: hoseMM.branches[k] || hoseMM.stem, i: k + 1 }); }
+    }
+    return out;
+  }
+  hosePieces(best).forEach(pc => {
+    const pts = smooth(pc.nodes, 0.9, 0.12);
+    addMesh(tube(pts, rIn(pc.d) * 0.96, 20), { kind: 'slurry', col: [0.09, 0.09, 0.10], spec: 0.35, shin: 30 }, 'hose');
+    addMesh(tube(pts, rOut(pc.d), 28), { kind: 'silicone', col: pieceCol(pc.i), alpha: 0.5, fres: 0.45, spec: 1.0, shin: 140, transparent: true }, 'hose');
+  });
+  const FIT = { kind: 'fitting', col: [0.94, 0.94, 0.92], spec: 0.5, shin: 60 }, RED = { kind: 'reducer', col: [0.95, 0.70, 0.20], spec: 0.6, shin: 50 };
+  const GLOW = { kind: 'glow', col: [1.0, 0.72, 0.18], alpha: 0.18, fres: 0.5, spec: 0.2, shin: 20, transparent: true, pulse: true };
+  // 구조 키우기: 찾은 부품마다 표시
+  if (GRAPH) (D.features || []).forEach(f => {
+    if (f.type.startsWith('곡선')) return;
+    const P0 = W(f.p), rS = rOut(hoseMM.stem);
+    if (f.type === '굵기 변화') {
+      let dir = [1, 0, 0]; (D.pieces || []).forEach(pc => { const n = pc.nodes.map(W); const e = n[n.length - 1];
+        if (V3.len(V3.sub(e, P0)) < 1e-3 && n.length > 1) dir = V3.norm(V3.sub(e, n[n.length - 2])); });
+      addMesh(cyl(V3.sub(P0, V3.mul(dir, 0.45)), V3.add(P0, V3.mul(dir, 0.45)), rS * 1.15, rS * 1.15 * Math.max(0.5, Math.min(2.5, f.ratio || 1)), 32, true), RED, 'hose');
+      addLabel(P0, `굵기 ×${(f.ratio || 1).toFixed(2)}`, '#c2410c', true);
+    } else {
+      addMesh(sphere(P0, rS * 1.55, 24), FIT, 'hose');
+      addLabel(P0, f.type === '갈라짐' ? '갈라짐' : '합쳐짐', null, true);
+    }
+    addMesh(sphere(P0, 0.7, 28), GLOW, 'hose');
+  });
+  // ± 범위 (잡음만 따진 1σ 타원체)
+  Object.entries(UNC).forEach(([k, u]) => {
+    if (k.startsWith('C') || !u.ell) return;
+    addMesh(ellip(W(u.p), u.ell.map(a => a.map(x => Math.min(Math.max(x, -6), 6))), 32), { kind: 'fog', col: [1.0, 0.62, 0.15], alpha: 0.14, fres: 0.3, spec: 0.1, shin: 10, transparent: true }, 'alt');
+  });
+  // 실제 점 (알 때만): 초록 공
+  if (D.truth_points) Object.entries(D.truth_points).forEach(([k, p]) => {
+    const P0 = W(p); addMesh(sphere(P0, 0.28, 24), { kind: 'truth', col: cssRGB('--truth'), spec: 0.5, shin: 60 }, 'truth');
+    addLabel(V3.add(P0, [0, -0.9, 0]), `실제 ${({ J: '갈라짐', J2: '합쳐짐', P: '굵기 변화' })[k] || k}`, css('--truth'), false, 'truth');
+  });
+  // 분기점: Y자 연결관
+  if (nb >= 2) {
+    const J = best[0][best[0].length - 1]; const rS = rOut(hoseMM.stem);
+    const brs = LOOP ? [best[1], best[2]] : best.slice(1);
+    const yfit = (P0, dirs, label) => {
+      addMesh(sphere(P0, rS * 1.45, 28), FIT, 'hose');
+      dirs.forEach(d => addMesh(cyl(P0, V3.add(P0, V3.mul(d, 0.9)), rS * 1.25, rS * 1.12, 32, true), FIT, 'hose'));
+      addMesh(sphere(P0, 0.7, 28), GLOW, 'hose');
+      addLabel(P0, label, null, true);
+    };
+    yfit(J, [V3.norm(V3.sub(best[0][best[0].length - 2], J)), ...brs.map(pl => V3.norm(V3.sub(pl[1], J)))], LOOP ? 'J1' : 'J');
+    if (LOOP) { const J2 = best[3][0]; yfit(J2, [V3.norm(V3.sub(best[3][1], J2)), ...brs.map(pl => V3.norm(V3.sub(pl[pl.length - 2], J2)))], 'J2'); }
+    // 굵기가 바뀌는 곳: 이음관(리듀서)
+    brs.forEach((pl, k) => {
+      const dB = hoseMM.branches[k] || hoseMM.stem; const dir = V3.norm(V3.sub(pl[1], J));
+      if (Math.abs(dB - hoseMM.stem) > 0.01) {
+        const p0 = V3.add(J, V3.mul(dir, 0.9)), p1 = V3.add(J, V3.mul(dir, 1.8));
+        addMesh(cyl(p0, p1, rOut(hoseMM.stem) * 1.15, rOut(dB) * 1.15, 32, true), RED, 'hose');
+        addMesh(torus(p1, dir, rOut(dB) * 1.25, 0.05, 40, 8), { kind: 'reducer', col: [0.85, 0.30, 0.10], spec: 0.4, shin: 30 }, 'hose');
+        addLabel(V3.add(J, V3.mul(dir, 1.4)), `${hoseMM.stem}→${dB} mm`, '#c2410c', true);
+      }
+    });
+  }
+  // 굵기 바뀌는 점
+  if (STEP) {
+    const P0 = best[0][best[0].length - 1], dirA = V3.norm(V3.sub(P0, best[0][best[0].length - 2])), dB = hoseMM.branches[0] || hoseMM.stem;
+    addMesh(cyl(V3.sub(P0, V3.mul(dirA, 0.45)), V3.add(P0, V3.mul(dirA, 0.45)), rOut(hoseMM.stem) * 1.15, rOut(dB) * 1.15, 32, true), RED, 'hose');
+    addMesh(sphere(P0, 0.7, 28), GLOW, 'hose');
+    addLabel(P0, G.hose_known ? `P ${hoseMM.stem}→${dB} mm` : 'P 굵기 변화', null, true);
+    const Cw = W(S.C[0]); addMesh(torus(Cw, V3.norm(V3.sub(W(D.outlets[0]), inletW)), rOut(dB) * 1.7, 0.05, 40, 8), { kind: 'marker', col: [0.6, 0.6, 0.65], spec: 0.4, shin: 30 }, 'hose');
+    if (V3.len(V3.sub(Cw, P0)) > 1) addLabel(Cw, 'C', css('--muted'), false);
+  }
+  // 중간점 표시 링
+  best.forEach((pl, i) => {
+    if (STEP || GRAPH) return;
+    if (nb >= 2 && i === 0) return;
+    if (LOOP && i === 3) return;
+    const k = nb >= 2 ? i - 1 : 0; const C = W(S.C[k]);
+    let near = 0; pl.forEach((q, j) => { if (V3.len(V3.sub(q, C)) < V3.len(V3.sub(pl[near], C))) near = j; });
+    const d = V3.norm(V3.sub(pl[Math.min(near + 1, pl.length - 1)], pl[Math.max(near - 1, 0)]));
+    const dd = nb >= 2 ? (hoseMM.branches[k] || hoseMM.stem) : hoseMM.stem;
+    addMesh(torus(C, d, rOut(dd) * 1.7, 0.05, 40, 8), { kind: 'marker', col: pieceCol(i), spec: 0.4, shin: 30 }, 'hose');
+    addLabel(C, `C${k + 1}`, css(nb >= 2 ? brCol[k % 3] : '--b1'), false);
+  });
+  // 실제 경로 (초록 점선 관)
+  if (D.truth) D.truth.forEach(pl => {
+    const pts = smooth(pl.map(W), 0.6, 0.08);
+    dashes(pts, 0.45, 0.3).forEach(seg => addMesh(tube(seg, 0.075, 12, true), { kind: 'truth', col: cssRGB('--truth'), spec: 0.3, shin: 30 }, 'truth'));
+  });
+  // 다른 후보 (가는 반투명 관)
+  D.alt.forEach(set => set.forEach((pl, i) => addMesh(tube(smooth(pl.map(W), 0.6, 0.2), 0.07, 12, true), { kind: 'alt', col: pieceCol(i), alpha: 0.35, transparent: true, spec: 0.2 }, 'alt')));
+  // 구멍 이름
+  addLabel(inletW, '입구', null, false);
+  outsW.forEach((o, k) => addLabel(V3.add(o, V3.mul(outD, 1.5)), (D.outlet_names || [])[k] || `출구${k + 1}`, null, false, 'lab', true));
+  (D.all_outlets || []).forEach((o, k) => { if (D.outlets.some(u => Math.hypot(u[0] - o[0], u[1] - o[1], u[2] - o[2]) < 0.01)) return;
+    addLabel(V3.add(W(o), V3.mul(outD, 1.5)), `${(D.all_outlet_names || [])[k] || '출구' + (k + 1)} (안 씀)`, css('--muted'), false, 'lab', true); });
+  // 센서
+  sensors.forEach(s => {
+    if (api.sensor) api.sensor(s);
+    else {
+      const h = V3.mul(s.dims, 0.5);
+      addMesh(boxM(V3.sub(s.body, h), V3.add(s.body, h)), { col: [0.20, 0.20, 0.23], spec: 0.5, shin: 60 }, 'base');
+      addMesh(sphere(s.n ? V3.add(s.body, V3.mul(s.n, s.dims[s.ax] / 2 + 0.05)) : V3.add(s.body, [0, h[1] + 0.05, 0]), 0.16, 12), { col: [0.85, 0.15, 0.15], spec: 0.6, shin: 60, emis: 0.2 }, 'base');
+    }
+    addLabel(s.n ? V3.add(s.body, V3.mul(s.n, s.dims[s.ax] / 2)) : s.body, s.k, css('--sensor'), true);
+  });
+
+  const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const VIEWS = { iso: [0.65, 0.42], top: [0, 1.5], front: [0, 0.02], side: [-Math.PI / 2, 0.02], out: [Math.PI / 2, 0.02] };
+  const focus = { J: (nb >= 2 || STEP) ? best[0][best[0].length - 1] : W(S.C[0]), in: inletW, out: V3.mul(V3.add(outsW[0], outsW[outsW.length - 1]), 0.5) };
+  const fview = { J: [0.75, 0.5, 9], in: [-0.9, 0.25, 6], out: [1.1, 0.3, outsW.length > 1 ? 11 : 6] };
+  return { labels, lo, hi, center, diag, VIEWS, focus, fview };
+}
+
+// ---------- 3D: 예전 방식 (three.js를 못 불러올 때, 예: 인터넷 없이 저장한 HTML을 열 때) ----------
 function start3D() {
+  const gl = canvas.getContext('webgl', { antialias: true, alpha: false, premultipliedAlpha: false }) || canvas.getContext('experimental-webgl');
+  if (!gl) return startFallback();
   const VS = `attribute vec3 aP;attribute vec3 aN;uniform mat4 uVP;varying vec3 vP;varying vec3 vN;
   void main(){vP=aP;vN=aN;gl_Position=uVP*vec4(aP,1.0);}`;
   const FS = `precision mediump float;varying vec3 vP;varying vec3 vN;
@@ -253,316 +616,9 @@ function start3D() {
     const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(seg), gl.STATIC_DRAW);
     lines.push(Object.assign({ buf, n: seg.length / 3, group: group || 'base', alpha: 1 }, mat));
   }
-  const pushV = (o, p, n) => { o.push(p[0], p[1], p[2], n[0], n[1], n[2]); };
-  function quad(o, a, b, c, d, n) { pushV(o, a, n); pushV(o, b, n); pushV(o, c, n); pushV(o, a, n); pushV(o, c, n); pushV(o, d, n); }
-
-  // ---- 관 (parallel transport frame) ----
-  function tube(pts, r, seg = 20, caps = true) {
-    const o = [], nP = pts.length; if (nP < 2) return o;
-    const T = pts.map((p, i) => V3.norm(V3.sub(pts[Math.min(i + 1, nP - 1)], pts[Math.max(i - 1, 0)])));
-    let N = V3.norm(V3.cross(T[0], Math.abs(T[0][1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]));
-    const rings = [];
-    for (let i = 0; i < nP; i++) {
-      if (i > 0) { N = V3.norm(V3.sub(N, V3.mul(T[i], V3.dot(N, T[i])))); }
-      const B = V3.cross(T[i], N); const ring = [];
-      for (let j = 0; j <= seg; j++) { const th = 2 * Math.PI * j / seg; const d = V3.add(V3.mul(N, Math.cos(th)), V3.mul(B, Math.sin(th))); ring.push([V3.add(pts[i], V3.mul(d, r)), d]); }
-      rings.push(ring);
-    }
-    for (let i = 0; i < nP - 1; i++) for (let j = 0; j < seg; j++) {
-      const a = rings[i][j], b = rings[i + 1][j], c = rings[i + 1][j + 1], d = rings[i][j + 1];
-      pushV(o, a[0], a[1]); pushV(o, b[0], b[1]); pushV(o, c[0], c[1]); pushV(o, a[0], a[1]); pushV(o, c[0], c[1]); pushV(o, d[0], d[1]);
-    }
-    if (caps) for (const [i, s] of [[0, -1], [nP - 1, 1]]) {
-      const n = V3.mul(T[i], s);
-      for (let j = 0; j < seg; j++) { pushV(o, pts[i], n); pushV(o, rings[i][j][0], n); pushV(o, rings[i][j + 1][0], n); }
-    }
-    return o;
-  }
-  function cyl(p0, p1, r0, r1, seg = 24, caps = true) {
-    const o = []; const ax = V3.norm(V3.sub(p1, p0)); const L = V3.len(V3.sub(p1, p0));
-    const N = V3.norm(V3.cross(ax, Math.abs(ax[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])); const B = V3.cross(ax, N);
-    const slope = (r0 - r1) / Math.max(L, 1e-6);
-    for (let j = 0; j < seg; j++) {
-      const t0 = 2 * Math.PI * j / seg, t1 = 2 * Math.PI * (j + 1) / seg;
-      const d0 = V3.add(V3.mul(N, Math.cos(t0)), V3.mul(B, Math.sin(t0))), d1 = V3.add(V3.mul(N, Math.cos(t1)), V3.mul(B, Math.sin(t1)));
-      const n0 = V3.norm(V3.add(d0, V3.mul(ax, slope))), n1 = V3.norm(V3.add(d1, V3.mul(ax, slope)));
-      const a = V3.add(p0, V3.mul(d0, r0)), b = V3.add(p1, V3.mul(d0, r1)), c = V3.add(p1, V3.mul(d1, r1)), d = V3.add(p0, V3.mul(d1, r0));
-      pushV(o, a, n0); pushV(o, b, n0); pushV(o, c, n1); pushV(o, a, n0); pushV(o, c, n1); pushV(o, d, n1);
-      if (caps) { const m0 = V3.mul(ax, -1); pushV(o, p0, m0); pushV(o, d, m0); pushV(o, a, m0); pushV(o, p1, ax); pushV(o, b, ax); pushV(o, c, ax); }
-    }
-    return o;
-  }
-  function ellip(c, ax3, seg = 24) {           // ax3: 세 축 벡터(길이 = 반지름)
-    const o = []; const n2 = ax3.map(a => Math.max(V3.dot(a, a), 1e-6));
-    const P2 = (i, j) => { const th = Math.PI * i / seg, ph = 2 * Math.PI * j / seg; const u = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)];
-      let p = c, n = [0, 0, 0]; for (let k = 0; k < 3; k++) { p = V3.add(p, V3.mul(ax3[k], u[k])); n = V3.add(n, V3.mul(ax3[k], u[k] / n2[k])); }
-      return [p, V3.norm(n)]; };
-    for (let i = 0; i < seg; i++) for (let j = 0; j < seg; j++) {
-      const a = P2(i, j), b = P2(i + 1, j), cc = P2(i + 1, j + 1), d = P2(i, j + 1);
-      pushV(o, a[0], a[1]); pushV(o, b[0], b[1]); pushV(o, cc[0], cc[1]); pushV(o, a[0], a[1]); pushV(o, cc[0], cc[1]); pushV(o, d[0], d[1]);
-    }
-    return o;
-  }
-  function sphere(c, r, seg = 20) {
-    const o = [];
-    const P2 = (i, j) => { const th = Math.PI * i / seg, ph = 2 * Math.PI * j / seg; const n = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)]; return [V3.add(c, V3.mul(n, r)), n]; };
-    for (let i = 0; i < seg; i++) for (let j = 0; j < seg; j++) {
-      const a = P2(i, j), b = P2(i + 1, j), cc = P2(i + 1, j + 1), d = P2(i, j + 1);
-      pushV(o, a[0], a[1]); pushV(o, b[0], b[1]); pushV(o, cc[0], cc[1]); pushV(o, a[0], a[1]); pushV(o, cc[0], cc[1]); pushV(o, d[0], d[1]);
-    }
-    return o;
-  }
-  function torus(c, ax, R, r, su = 72, sv = 16) {
-    ax = V3.norm(ax); const N = V3.norm(V3.cross(ax, Math.abs(ax[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])); const B = V3.cross(ax, N); const o = [];
-    const P2 = (i, j) => { const t = 2 * Math.PI * i / su, s = 2 * Math.PI * j / sv; const radial = V3.add(V3.mul(N, Math.cos(t)), V3.mul(B, Math.sin(t)));
-      const n = V3.add(V3.mul(radial, Math.cos(s)), V3.mul(ax, Math.sin(s))); return [V3.add(V3.add(c, V3.mul(radial, R)), V3.mul(n, r)), n]; };
-    for (let i = 0; i < su; i++) for (let j = 0; j < sv; j++) {
-      const a = P2(i, j), b = P2(i + 1, j), cc = P2(i + 1, j + 1), d = P2(i, j + 1);
-      pushV(o, a[0], a[1]); pushV(o, b[0], b[1]); pushV(o, cc[0], cc[1]); pushV(o, a[0], a[1]); pushV(o, cc[0], cc[1]); pushV(o, d[0], d[1]);
-    }
-    return o;
-  }
-  function boxM(lo, hi) {
-    const o = []; const [x0, y0, z0] = lo, [x1, y1, z1] = hi;
-    quad(o, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1]); quad(o, [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1]);
-    quad(o, [x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0]); quad(o, [x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0]);
-    quad(o, [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0]); quad(o, [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0]);
-    return o;
-  }
-  // 벽 한 장 (k축 방향 두께, 구멍 뚫림)
-  function wall(k, k0, k1, lo, hi, holes, res) {
-    const o = [], rim = []; const iu = (k + 1) % 3, iv = (k + 2) % 3;
-    const P3 = (kk, uu, vv) => { const p = [0, 0, 0]; p[k] = kk; p[iu] = uu; p[iv] = vv; return p; };
-    const nk = [0, 0, 0]; nk[k] = 1; const nkm = [0, 0, 0]; nkm[k] = -1;
-    const u0 = lo[iu], u1 = hi[iu], v0 = lo[iv], v1 = hi[iv];
-    if (!holes.length) { quad(o, P3(k1, u0, v0), P3(k1, u1, v0), P3(k1, u1, v1), P3(k1, u0, v1), nk); quad(o, P3(k0, u0, v0), P3(k0, u0, v1), P3(k0, u1, v1), P3(k0, u1, v0), nkm); }
-    else {
-      const nu = Math.ceil((u1 - u0) / res), nv = Math.ceil((v1 - v0) / res), du = (u1 - u0) / nu, dv = (v1 - v0) / nv;
-      for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
-        const ua = u0 + i * du, va = v0 + j * dv, uc = ua + du / 2, vc = va + dv / 2;
-        if (holes.some(h => Math.hypot(uc - h.u, vc - h.v) < h.r)) continue;
-        quad(o, P3(k1, ua, va), P3(k1, ua + du, va), P3(k1, ua + du, va + dv), P3(k1, ua, va + dv), nk);
-        quad(o, P3(k0, ua, va), P3(k0, ua, va + dv), P3(k0, ua + du, va + dv), P3(k0, ua + du, va), nkm);
-      }
-      holes.forEach(h => rim.push(...cyl(P3(k0, h.u, h.v), P3(k1, h.u, h.v), h.r, h.r, 28, false)));
-    }
-    const nu_ = [0, 0, 0]; nu_[iu] = 1; const nv_ = [0, 0, 0]; nv_[iv] = 1;
-    quad(rim, P3(k0, u0, v0), P3(k1, u0, v0), P3(k1, u0, v1), P3(k0, u0, v1), V3.mul(nu_, -1));
-    quad(rim, P3(k0, u1, v0), P3(k0, u1, v1), P3(k1, u1, v1), P3(k1, u1, v0), nu_);
-    quad(rim, P3(k0, u0, v0), P3(k0, u1, v0), P3(k1, u1, v0), P3(k1, u0, v0), V3.mul(nv_, -1));
-    quad(rim, P3(k0, u0, v1), P3(k1, u0, v1), P3(k1, u1, v1), P3(k0, u1, v1), nv_);
-    return [o, rim];
-  }
-  // 꺾인 점을 둥글게
-  function smooth(nodes, R, step) {
-    const pts = [nodes[0]];
-    if (nodes.length > 6) pts.push(...nodes.slice(1, -1));   // 이미 곡선으로 계산된 경로
-    else for (let i = 1; i < nodes.length - 1; i++) {
-      const a = nodes[i - 1], p = nodes[i], b = nodes[i + 1];
-      const l1 = V3.len(V3.sub(p, a)), l2 = V3.len(V3.sub(b, p)); if (l1 < 1e-6 || l2 < 1e-6) continue;
-      const u1 = V3.mul(V3.sub(p, a), 1 / l1), u2 = V3.mul(V3.sub(b, p), 1 / l2);
-      const r = Math.min(R, l1 * 0.45, l2 * 0.45); const s = V3.sub(p, V3.mul(u1, r)), e = V3.add(p, V3.mul(u2, r));
-      pts.push(s); for (let q = 1; q < 10; q++) { const t = q / 10; pts.push(V3.add(V3.add(V3.mul(s, (1 - t) * (1 - t)), V3.mul(p, 2 * t * (1 - t))), V3.mul(e, t * t))); } pts.push(e);
-    }
-    pts.push(nodes[nodes.length - 1]);
-    const out = [pts[0]];
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1], b = pts[i], L = V3.len(V3.sub(b, a)); if (L < 1e-5) continue;
-      const n = Math.max(1, Math.ceil(L / step)); for (let q = 1; q <= n; q++) out.push(V3.add(a, V3.mul(V3.sub(b, a), q / n)));
-    }
-    return out;
-  }
-  function dashes(pts, on, off) {      // 점선 관 조각들
-    const out = []; let acc = 0, cur = [pts[0]], drawing = true;
-    for (let i = 1; i < pts.length; i++) {
-      acc += V3.len(V3.sub(pts[i], pts[i - 1]));
-      if (drawing) cur.push(pts[i]);
-      if (drawing && acc >= on) { if (cur.length > 1) out.push(cur); drawing = false; acc = 0; }
-      else if (!drawing && acc >= off) { drawing = true; acc = 0; cur = [pts[i]]; }
-    }
-    if (drawing && cur.length > 1) out.push(cur);
-    return out;
-  }
-
-  // ---------- 장면 만들기 ----------
-  const dark = matchMedia('(prefers-color-scheme: dark)').matches && document.documentElement.dataset.theme !== 'light' || document.documentElement.dataset.theme === 'dark';
-  const BO = G.box_outer || { a: D.box.a, b: D.box.b, c: D.box.c }, wT = G.wall || 0.5;
-  const lo = W([BO.a[0], BO.b[1], BO.c[0]]), hi = W([BO.a[1], BO.b[0], BO.c[1]]);   // z = -b 이므로 b의 큰 값이 z의 작은 값
-  const center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
-  const labels = [];
-  const addLabel = (p, html, color, key, group) => labels.push({ p, html, color, key, group: group || 'lab' });
-
-  // 탁자, 받침대
-  const tableY = 0;
-  addMesh(boxM([center[0] - 30, tableY - 1.2, center[2] - 30], [center[0] + 30, tableY, center[2] + 30]), { col: dark ? [0.22, 0.22, 0.23] : [0.84, 0.83, 0.80], spec: 0.05, shin: 8 });
-  { const g = []; for (let x = Math.floor(center[0] - 14); x <= center[0] + 14; x++) g.push(x, tableY + 0.01, center[2] - 14, x, tableY + 0.01, center[2] + 14);
-    for (let z = Math.floor(center[2] - 14); z <= center[2] + 14; z++) g.push(center[0] - 14, tableY + 0.01, z, center[0] + 14, tableY + 0.01, z);
-    addLines(g, { col: dark ? [0.32, 0.32, 0.34] : [0.70, 0.69, 0.66], alpha: 0.6 }); }
-  if (lo[1] > 2) addMesh(boxM([lo[0] + 0.6, tableY, lo[2] + 0.6], [hi[0] - 0.6, lo[1] - 0.01, hi[2] - 0.6]), { col: dark ? [0.80, 0.80, 0.78] : [0.97, 0.97, 0.95], spec: 0.02, shin: 4 });
-
-  // 아크릴 상자 (벽 6장 + 구멍)
-  const holeR = (G.hole_mm || 6.5) / 20;
-  const holesW = [D.inlet, ...(D.all_outlets || D.outlets)].map(p => W(p));
-  const faces = [
-    { k: 0, k0: lo[0], k1: lo[0] + wT }, { k: 0, k0: hi[0] - wT, k1: hi[0] },
-    { k: 1, k0: lo[1], k1: lo[1] + wT }, { k: 1, k0: hi[1] - wT, k1: hi[1] },
-    { k: 2, k0: lo[2], k1: lo[2] + wT }, { k: 2, k0: hi[2] - wT, k1: hi[2] }];
-  faces.forEach(f => {
-    const iu = (f.k + 1) % 3, iv = (f.k + 2) % 3;
-    const hs = holesW.filter(p => Math.abs(p[f.k] - (f.k0 + f.k1) / 2) < wT * 1.5).map(p => ({ u: p[iu], v: p[iv], r: holeR }));
-    const [o, rim] = wall(f.k, f.k0, f.k1, lo, hi, hs, 0.1);
-    addMesh(o, { col: [0.82, 0.92, 1.0], alpha: 0.10, fres: 0.55, spec: 0.9, shin: 120, transparent: true }, 'box');
-    addMesh(rim, { col: [0.75, 0.88, 1.0], alpha: 0.32, fres: 0.4, spec: 0.8, shin: 90, transparent: true }, 'box');
-  });
-  { const [x0, y0, z0] = lo, [x1, y1, z1] = hi; const e = [];
-    const E = (a, b) => e.push(...a, ...b);
-    E([x0, y0, z0], [x1, y0, z0]); E([x0, y1, z0], [x1, y1, z0]); E([x0, y0, z1], [x1, y0, z1]); E([x0, y1, z1], [x1, y1, z1]);
-    E([x0, y0, z0], [x0, y1, z0]); E([x1, y0, z0], [x1, y1, z0]); E([x0, y0, z1], [x0, y1, z1]); E([x1, y0, z1], [x1, y1, z1]);
-    E([x0, y0, z0], [x0, y0, z1]); E([x1, y0, z0], [x1, y0, z1]); E([x0, y1, z0], [x0, y1, z1]); E([x1, y1, z0], [x1, y1, z1]);
-    addLines(e, { col: dark ? [0.62, 0.74, 0.86] : [0.35, 0.50, 0.65], alpha: 0.9 }, 'box'); }
-
-  // 코일
-  (G.coils || []).forEach(c => {
-    const ab = G.coil_axis_bc || [4, 16.5]; const cw = W([c.a, ab[0], ab[1]]);
-    addMesh(torus(cw, [1, 0, 0], c.R, 0.9), { col: [0.72, 0.42, 0.22], spec: 0.7, shin: 50 }, 'coil');
-    addLabel(V3.add(cw, [0, c.R + 1.2, 0]), c.name, null, false, 'coil');
-  });
-
-  // 호스 (복원 결과)
-  const IDs = hoseMM.stem / 20, wallH = (G.hose_wall_mm || 1) / 10;
-  const rIn = d => d / 20, rOut = d => d / 20 + wallH;
-  const upD = Wd(G.up_dir || [-1, 0, 0]), outD = Wd(G.out_dir || [1, 0, 0]), Lout = G.outlet_len || 18;
-  const pieceCol = i => GRAPH ? (i >= 10 ? cssRGB(i === 10 ? '--b3' : '--sensor') : cssRGB(i % 2 === 0 ? '--b1' : '--b2')) : STEP ? cssRGB(i === 0 ? '--b1' : '--b2') : nb >= 2 ? ((i === 0 || (LOOP && i === 3)) ? [0.80, 0.80, 0.84] : cssRGB(brCol[(i - 1) % 3])) : cssRGB('--b1');
-  const best = D.best.map(pl => pl.map(W));
-  const inletW = W(D.inlet), outsW = D.outlets.map(W);
-  function hosePieces(paths) {        // 각 조각: {pts, d}
-    const out = [];
-    if (GRAPH) {
-      const P = D.pieces || [], last = P.length ? P[P.length - 1].sec : 0;
-      P.forEach((pc, i) => {
-        let nodes = pc.nodes.map(W);
-        if (pc.sec === 0) nodes = [V3.add(inletW, V3.mul(upD, 8)), ...nodes];
-        if (pc.sec === last && pc.role === 'tube') nodes = [...nodes, V3.add(nodes[nodes.length - 1], V3.mul(outD, Lout))];
-        out.push({ nodes, d: pc.d || hoseMM.stem, i: pc.role === 'branch' ? 10 + pc.k : pc.sec });
-      });
-      if (P.length && P[P.length - 1].role === 'branch') { const o = outsW[0]; out.push({ nodes: [o, V3.add(o, V3.mul(outD, Lout))], d: hoseMM.stem, i: last }); }
-      return out;
-    }
-    if (STEP) {
-      out.push({ nodes: [V3.add(inletW, V3.mul(upD, 8)), ...paths[0]], d: hoseMM.stem, i: 0 });
-      const l2 = paths[1]; out.push({ nodes: [...l2, V3.add(l2[l2.length - 1], V3.mul(outD, Lout))], d: hoseMM.branches[0] || hoseMM.stem, i: 1 });
-    } else if (LOOP) {
-      const mg = paths[3];
-      out.push({ nodes: [V3.add(inletW, V3.mul(upD, 8)), ...paths[0]], d: hoseMM.stem, i: 0 });
-      for (let k = 0; k < 2; k++) out.push({ nodes: paths[k + 1], d: hoseMM.branches[k] || hoseMM.stem, i: k + 1 });
-      out.push({ nodes: [...mg, V3.add(mg[mg.length - 1], V3.mul(outD, Lout))], d: hoseMM.stem, i: 3 });
-    } else if (nb === 1) {
-      const nodes = [V3.add(inletW, V3.mul(upD, 8)), ...paths[0], V3.add(paths[0][paths[0].length - 1], V3.mul(outD, Lout))];
-      out.push({ nodes, d: hoseMM.stem, i: 1 });
-    } else {
-      out.push({ nodes: [V3.add(inletW, V3.mul(upD, 8)), ...paths[0]], d: hoseMM.stem, i: 0 });
-      for (let k = 0; k < nb; k++) { const pl = paths[k + 1]; out.push({ nodes: [...pl, V3.add(pl[pl.length - 1], V3.mul(outD, Lout))], d: hoseMM.branches[k] || hoseMM.stem, i: k + 1 }); }
-    }
-    return out;
-  }
-  hosePieces(best).forEach(pc => {
-    const pts = smooth(pc.nodes, 0.9, 0.15);
-    addMesh(tube(pts, rIn(pc.d) * 0.98, 18), { col: [0.09, 0.09, 0.10], spec: 0.35, shin: 30 }, 'hose');
-    addMesh(tube(pts, rOut(pc.d), 26), { col: pieceCol(pc.i), alpha: 0.5, fres: 0.45, spec: 1.0, shin: 140, transparent: true }, 'hose');
-  });
-  // 구조 키우기: 찾은 부품마다 표시
-  if (GRAPH) (D.features || []).forEach(f => {
-    if (f.type.startsWith('곡선')) return;
-    const P0 = W(f.p), rS = rOut(hoseMM.stem);
-    if (f.type === '굵기 변화') {
-      let dir = [1, 0, 0]; (D.pieces || []).forEach(pc => { const n = pc.nodes.map(W); const e = n[n.length - 1];
-        if (V3.len(V3.sub(e, P0)) < 1e-3 && n.length > 1) dir = V3.norm(V3.sub(e, n[n.length - 2])); });
-      addMesh(cyl(V3.sub(P0, V3.mul(dir, 0.45)), V3.add(P0, V3.mul(dir, 0.45)), rS * 1.15, rS * 1.15 * Math.max(0.5, Math.min(2.5, f.ratio || 1)), 32, true), { col: [0.95, 0.70, 0.20], spec: 0.6, shin: 50 }, 'hose');
-      addLabel(P0, `굵기 ×${(f.ratio || 1).toFixed(2)}`, '#c2410c', true);
-    } else {
-      addMesh(sphere(P0, rS * 1.55, 24), { col: [0.94, 0.94, 0.92], spec: 0.5, shin: 60 }, 'hose');
-      addLabel(P0, f.type === '갈라짐' ? '갈라짐' : '합쳐짐', null, true);
-    }
-    addMesh(sphere(P0, 0.7, 28), { col: [1.0, 0.72, 0.18], alpha: 0.18, fres: 0.5, spec: 0.2, shin: 20, transparent: true, pulse: true }, 'hose');
-  });
-  // ± 범위 (잡음만 따진 1σ 타원체)
-  Object.entries(UNC).forEach(([k, u]) => {
-    if (k.startsWith('C') || !u.ell) return;
-    addMesh(ellip(W(u.p), u.ell.map(a => a.map(x => Math.min(Math.max(x, -6), 6)))), { col: [1.0, 0.62, 0.15], alpha: 0.14, fres: 0.3, spec: 0.1, shin: 10, transparent: true }, 'alt');
-  });
-  // 실제 점 (알 때만): 초록 공
-  if (D.truth_points) Object.entries(D.truth_points).forEach(([k, p]) => {
-    const P0 = W(p); addMesh(sphere(P0, 0.28, 20), { col: cssRGB('--truth'), spec: 0.5, shin: 60 }, 'truth');
-    addLabel(V3.add(P0, [0, -0.9, 0]), `실제 ${({ J: '갈라짐', J2: '합쳐짐', P: '굵기 변화' })[k] || k}`, css('--truth'), false, 'truth');
-  });
-  // 분기점: Y자 연결관 + 강조
-  if (nb >= 2) {
-    const J = best[0][best[0].length - 1]; const rS = rOut(hoseMM.stem);
-    const brs = LOOP ? [best[1], best[2]] : best.slice(1);
-    const yfit = (P0, dirs, label) => {
-      addMesh(sphere(P0, rS * 1.55, 24), { col: [0.94, 0.94, 0.92], spec: 0.5, shin: 60 }, 'hose');
-      dirs.forEach(d => addMesh(cyl(P0, V3.add(P0, V3.mul(d, 0.9)), rS * 1.3, rS * 1.3, 28, true), { col: [0.94, 0.94, 0.92], spec: 0.5, shin: 60 }, 'hose'));
-      addMesh(sphere(P0, 0.7, 28), { col: [1.0, 0.72, 0.18], alpha: 0.18, fres: 0.5, spec: 0.2, shin: 20, transparent: true, pulse: true }, 'hose');
-      addLabel(P0, label, null, true);
-    };
-    yfit(J, [V3.norm(V3.sub(best[0][best[0].length - 2], J)), ...brs.map(pl => V3.norm(V3.sub(pl[1], J)))], LOOP ? 'J1' : 'J');
-    if (LOOP) { const J2 = best[3][0]; yfit(J2, [V3.norm(V3.sub(best[3][1], J2)), ...brs.map(pl => V3.norm(V3.sub(pl[pl.length - 2], J2)))], 'J2'); }
-    // 굵기가 바뀌는 곳: 이음관(리듀서)
-    brs.forEach((pl, k) => {
-      const dB = hoseMM.branches[k] || hoseMM.stem; const dir = V3.norm(V3.sub(pl[1], J));
-      const est = estD[k];
-      if (Math.abs(dB - hoseMM.stem) > 0.01) {
-        const p0 = V3.add(J, V3.mul(dir, 0.9)), p1 = V3.add(J, V3.mul(dir, 1.8));
-        addMesh(cyl(p0, p1, rOut(hoseMM.stem) * 1.15, rOut(dB) * 1.15, 32, true), { col: [0.95, 0.70, 0.20], spec: 0.6, shin: 50 }, 'hose');
-        addMesh(torus(p1, dir, rOut(dB) * 1.25, 0.05, 40, 8), { col: [0.85, 0.30, 0.10], spec: 0.4, shin: 30 }, 'hose');
-        addLabel(V3.add(J, V3.mul(dir, 1.4)), `${hoseMM.stem}→${dB} mm`, '#c2410c', true);
-      }
-    });
-  }
-  // 굵기 바뀌는 점
-  if (STEP) {
-    const P0 = best[0][best[0].length - 1], dirA = V3.norm(V3.sub(P0, best[0][best[0].length - 2])), dB = hoseMM.branches[0] || hoseMM.stem;
-    addMesh(cyl(V3.sub(P0, V3.mul(dirA, 0.45)), V3.add(P0, V3.mul(dirA, 0.45)), rOut(hoseMM.stem) * 1.15, rOut(dB) * 1.15, 32, true), { col: [0.95, 0.70, 0.20], spec: 0.6, shin: 50 }, 'hose');
-    addMesh(sphere(P0, 0.7, 28), { col: [1.0, 0.72, 0.18], alpha: 0.18, fres: 0.5, spec: 0.2, shin: 20, transparent: true, pulse: true }, 'hose');
-    addLabel(P0, G.hose_known ? `P ${hoseMM.stem}→${dB} mm` : 'P 굵기 변화', null, true);
-    const Cw = W(S.C[0]); addMesh(torus(Cw, V3.norm(V3.sub(W(D.outlets[0]), inletW)), rOut(dB) * 1.7, 0.05, 40, 8), { col: [0.6, 0.6, 0.65], spec: 0.4, shin: 30 }, 'hose');
-    if (V3.len(V3.sub(Cw, P0)) > 1) addLabel(Cw, 'C', css('--muted'), false);
-  }
-  // 중간점 표시 링
-  best.forEach((pl, i) => {
-    if (STEP || GRAPH) return;
-    if (nb >= 2 && i === 0) return;
-    if (LOOP && i === 3) return;
-    const k = nb >= 2 ? i - 1 : 0; const C = W(S.C[k]);
-    let near = 0; pl.forEach((q, j) => { if (V3.len(V3.sub(q, C)) < V3.len(V3.sub(pl[near], C))) near = j; });
-    const d = V3.norm(V3.sub(pl[Math.min(near + 1, pl.length - 1)], pl[Math.max(near - 1, 0)]));
-    const dd = nb >= 2 ? (hoseMM.branches[k] || hoseMM.stem) : hoseMM.stem;
-    addMesh(torus(C, d, rOut(dd) * 1.7, 0.05, 40, 8), { col: pieceCol(i), spec: 0.4, shin: 30 }, 'hose');
-    addLabel(C, `C${k + 1}`, css(nb >= 2 ? brCol[k % 3] : '--b1'), false);
-  });
-  // 실제 경로 (초록 점선 관)
-  if (D.truth) D.truth.forEach(pl => {
-    const pts = smooth(pl.map(W), 0.6, 0.08);
-    dashes(pts, 0.45, 0.3).forEach(seg => addMesh(tube(seg, 0.075, 10, true), { col: cssRGB('--truth'), spec: 0.3, shin: 30 }, 'truth'));
-  });
-  // 다른 후보 (가는 반투명 관)
-  D.alt.forEach(set => set.forEach((pl, i) => addMesh(tube(smooth(pl.map(W), 0.6, 0.2), 0.07, 10, true), { col: pieceCol(i), alpha: 0.35, transparent: true, spec: 0.2 }, 'alt')));
-  // 구멍 이름
-  addLabel(inletW, '입구', null, false);
-  outsW.forEach((o, k) => addLabel(V3.add(o, V3.mul(outD, 1.5)), (D.outlet_names || [])[k] || `출구${k + 1}`, null, false));
-  (D.all_outlets || []).forEach((o, k) => { if (D.outlets.some(u => Math.hypot(u[0] - o[0], u[1] - o[1], u[2] - o[2]) < 0.01)) return;
-    addLabel(V3.add(W(o), V3.mul(outD, 1.5)), `${(D.all_outlet_names || [])[k] || '출구' + (k + 1)} (안 씀)`, css('--muted'), false); });
-  // 센서
-  Object.entries(D.sensors).forEach(([k, p]) => {
-    const c = W(p);
-    addMesh(boxM(V3.sub(c, [0.7, 0.35, 0.7]), V3.add(c, [0.7, 0.35, 0.7])), { col: [0.20, 0.20, 0.23], spec: 0.5, shin: 60 }, 'base');
-    addMesh(sphere(V3.add(c, [0, 0.37, 0]), 0.16, 12), { col: [0.85, 0.15, 0.15], spec: 0.6, shin: 60, emis: 0.2 }, 'base');
-    addLabel(c, k, css('--sensor'), true);
-  });
+  const { labels, lo, hi, center, diag, VIEWS, focus, fview } = buildScene({ mesh: addMesh, lines: addLines });
 
   // ---------- 카메라 ----------
-  const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
-  const VIEWS = { iso: [0.65, 0.42], top: [0, 1.5], front: [0, 0.02], side: [-Math.PI / 2, 0.02], out: [Math.PI / 2, 0.02] };
   let yaw = VIEWS.iso[0], pitch = VIEWS.iso[1], dist = diag * 1.9, target = center.slice();
   const show = { box: true, coil: false, truth: true, alt: true, lab: true, hose: true, base: true };
   function persp(fy, asp, n, f) { const t = 1 / Math.tan(fy / 2), nf = 1 / (n - f); return [t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) * nf, -1, 0, 0, 2 * f * n * nf, 0]; }
@@ -636,14 +692,274 @@ function start3D() {
   stage.addEventListener('pointerup', up_); stage.addEventListener('pointercancel', up_);
   stage.addEventListener('wheel', e => { e.preventDefault(); dist = Math.min(diag * 8, Math.max(diag * 0.1, dist * Math.exp(e.deltaY * 0.0012))); mark(); }, { passive: false });
   document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { [yaw, pitch] = VIEWS[b.dataset.v]; target = center.slice(); dist = diag * 1.9; mark(); });
-  const focus = { J: (nb >= 2 || STEP) ? best[0][best[0].length - 1] : W(S.C[0]), in: inletW, out: V3.mul(V3.add(outsW[0], outsW[outsW.length - 1]), 0.5) };
-  const fview = { J: [0.75, 0.5, 9], in: [-0.9, 0.25, 6], out: [1.1, 0.3, outsW.length > 1 ? 11 : 6] };
   document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { const f = b.dataset.f; target = focus[f].slice(); [yaw, pitch, dist] = fview[f]; mark(); });
   const tg = (id, key) => document.getElementById(id).onchange = e => { show[key] = e.target.checked; mark(); };
   tg('tBox', 'box'); tg('tCoil', 'coil'); tg('tTruth', 'truth'); tg('tAlt', 'alt'); tg('tLab', 'lab');
   if (!D.truth && !D.truth_points) document.getElementById('tTruth').parentElement.style.display = 'none';
   if (!D.alt.length) document.getElementById('tAlt').parentElement.style.display = 'none';
   window.__ready3d = true;
+}
+
+// ---------- 3D: 실제처럼 그리기 (three.js, 물리 기반 재질과 그림자) ----------
+const THREE_URL = 'https://cdn.jsdelivr.net/npm/three@0.170.0/';
+function loadThree() {
+  const mods = Promise.all(['three', 'three/addons/controls/OrbitControls.js', 'three/addons/environments/RoomEnvironment.js',
+    'three/addons/geometries/RoundedBoxGeometry.js'].map(m => import(m)));
+  const late = new Promise((_, no) => setTimeout(() => no(new Error('three.js 불러오기 시간 초과')), 15000));
+  return Promise.race([mods, late]).then(([T, OC, RE, RB]) => ({ T, OrbitControls: OC.OrbitControls, RoomEnvironment: RE.RoomEnvironment, RoundedBoxGeometry: RB.RoundedBoxGeometry }));
+}
+
+function startThree({ T, OrbitControls, RoomEnvironment, RoundedBoxGeometry }) {
+  let renderer;
+  try { renderer = new T.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' }); }
+  catch (e) { console.error(e); return startFallback(); }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.toneMapping = T.NeutralToneMapping; renderer.toneMappingExposure = dark ? 0.95 : 0.92;
+  renderer.shadowMap.enabled = true; renderer.shadowMap.type = T.PCFSoftShadowMap;
+
+  const scene = new T.Scene();
+  const SKY = dark ? '#1d1f22' : '#d8dbde';
+  scene.background = new T.Color(SKY);
+  scene.fog = new T.Fog(SKY, 60, 200);
+  const pmrem = new T.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.environmentIntensity = dark ? 0.32 : 0.42;
+
+  const groups = {};
+  const group = name => { if (!groups[name]) { groups[name] = new T.Group(); scene.add(groups[name]); } return groups[name]; };
+
+  // ---- 무늬: 탁자 상판의 고운 얼룩, 코일 감은 선 ----
+  function canvasTex(w, h, draw, repeat) {
+    const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
+    const t = new T.CanvasTexture(c); t.wrapS = t.wrapT = T.RepeatWrapping; if (repeat) t.repeat.set(...repeat);
+    t.anisotropy = renderer.capabilities.getMaxAnisotropy(); return t;
+  }
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const speckle = canvasTex(256, 256, (g, w, h) => {
+    const im = g.createImageData(w, h);
+    for (let i = 0; i < w * h; i++) { const v = 236 + rnd() * 19; im.data[4 * i] = im.data[4 * i + 1] = im.data[4 * i + 2] = v; im.data[4 * i + 3] = 255; }
+    g.putImageData(im, 0, 0);
+  }, [60, 60]);
+  speckle.colorSpace = T.SRGBColorSpace;
+  const windings = canvasTex(8, 256, (g, w, h) => {
+    for (let y = 0; y < h; y++) { const s = 0.5 + 0.5 * Math.cos((y % 4) / 4 * 2 * Math.PI); g.fillStyle = `rgb(${s * 255},${s * 255},${s * 255})`; g.fillRect(0, y, w, 1); }
+  }, [1, 6]);
+  const softDisc = canvasTex(128, 128, (g, w, h) => {
+    const r = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+    r.addColorStop(0, 'rgba(0,0,0,0.55)'); r.addColorStop(0.55, 'rgba(0,0,0,0.25)'); r.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = r; g.fillRect(0, 0, w, h);
+  });
+
+  // ---- 재질: 실제 물체 이름별 ----
+  const col = c => Array.isArray(c) ? new T.Color().setRGB(c[0], c[1], c[2], T.SRGBColorSpace) : new T.Color(c);
+  const mix = (a, b, t) => col(a).lerp(col(b), t);
+  const glare = new T.MeshStandardMaterial({ color: 0x000000, roughness: 0.04, metalness: 0, transparent: true, blending: T.AdditiveBlending,
+    depthWrite: false, envMapIntensity: dark ? 0.9 : 1.1, fog: false });
+  const glareSoft = glare.clone(); glareSoft.roughness = 0.3; glareSoft.envMapIntensity = 0.2;
+  const MAT = {
+    acrylic: () => new T.MeshPhysicalMaterial({ color: '#c9dedb', roughness: 0.05, transparent: true, opacity: dark ? 0.04 : 0.05, depthWrite: false }),
+    acrylicRim: () => new T.MeshPhysicalMaterial({ color: '#8fc2b6', roughness: 0.3, transparent: true, opacity: 0.55, depthWrite: false }),
+    slurry: () => new T.MeshPhysicalMaterial({ color: '#1e1f21', roughness: 0.5, metalness: 0, clearcoat: 0.2, clearcoatRoughness: 0.4 }),
+    silicone: m => new T.MeshPhysicalMaterial({ color: mix(m.col, '#e3e9ec', 0.15), roughness: 0.45, transparent: true, opacity: 0.32,
+      clearcoat: 0.3, clearcoatRoughness: 0.35, depthWrite: false }),
+    fitting: () => new T.MeshPhysicalMaterial({ color: '#ece9e1', roughness: 0.42, clearcoat: 0.3, clearcoatRoughness: 0.4 }),
+    reducer: m => new T.MeshPhysicalMaterial({ color: mix(m.col, '#ece9e1', 0.25), roughness: 0.42, clearcoat: 0.3 }),
+    marker: m => new T.MeshStandardMaterial({ color: col(m.col), roughness: 0.55 }),
+    fog: () => new T.MeshStandardMaterial({ color: '#ff9a2e', emissive: '#ff8a1e', emissiveIntensity: 0.35, roughness: 1, transparent: true, opacity: 0.13, depthWrite: false }),
+    truth: m => new T.MeshStandardMaterial({ color: col(m.col), roughness: 0.45 }),
+    alt: m => new T.MeshStandardMaterial({ color: col(m.col), roughness: 0.5, transparent: true, opacity: 0.35, depthWrite: false }),
+    plain: m => new T.MeshStandardMaterial({ color: col(m.col), roughness: 0.5 }),
+  };
+
+  // 예전 삼각형 목록 → three 모양. 법선과 감는 방향이 어긋난 삼각형은 뒤집어 맞춘다
+  function geom(tri) {
+    const a = new Float32Array(tri);
+    for (let i = 0; i < a.length; i += 18) {
+      const ux = a[i + 6] - a[i], uy = a[i + 7] - a[i + 1], uz = a[i + 8] - a[i + 2], vx = a[i + 12] - a[i], vy = a[i + 13] - a[i + 1], vz = a[i + 14] - a[i + 2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      if (nx * (a[i + 3] + a[i + 9] + a[i + 15]) + ny * (a[i + 4] + a[i + 10] + a[i + 16]) + nz * (a[i + 5] + a[i + 11] + a[i + 17]) < 0)
+        for (let j = 0; j < 6; j++) { const t = a[i + 6 + j]; a[i + 6 + j] = a[i + 12 + j]; a[i + 12 + j] = t; }
+    }
+    const g = new T.BufferGeometry(), ib = new T.InterleavedBuffer(a, 6);
+    g.setAttribute('position', new T.InterleavedBufferAttribute(ib, 3, 0)); g.setAttribute('normal', new T.InterleavedBufferAttribute(ib, 3, 3));
+    g.computeBoundingSphere(); return g;
+  }
+  const SOLID = { slurry: 1, fitting: 1, reducer: 1, marker: 1, truth: 1, plain: 1 };
+  function mesh(tri, m, grp) {
+    if (!tri.length || m.kind === 'glow') return;
+    const kind = MAT[m.kind] ? m.kind : 'plain', g = geom(tri);
+    const o = new T.Mesh(g, MAT[kind](m));
+    if (SOLID[kind]) { o.castShadow = true; o.receiveShadow = true; }
+    group(grp || 'base').add(o);
+    if (kind === 'acrylic' || kind === 'acrylicRim' || kind === 'silicone') {      // 맑은 물체의 반사만 더한다
+      const r = new T.Mesh(g, kind === 'silicone' ? glareSoft : glare); r.renderOrder = 2; group(grp || 'base').add(r);
+    }
+  }
+
+  // ---- 탁자, 받침대, 접지 그림자 ----
+  function ground({ center, lo, hi, tableY }) {
+    const top = new T.Mesh(new T.PlaneGeometry(600, 600), new T.MeshStandardMaterial({ color: dark ? '#2e3135' : '#8f9397', roughness: 0.8, map: speckle }));
+    top.rotation.x = -Math.PI / 2; top.position.set(center[0], tableY, center[2]); top.receiveShadow = true; group('base').add(top);
+    const w = hi[0] - lo[0] - 1.2, d = hi[2] - lo[2] - 1.2, h = lo[1] - tableY - 0.02;
+    if (h > 1) {
+      const stand = new T.Mesh(new RoundedBoxGeometry(w, h, d, 3, 0.25), new T.MeshStandardMaterial({ color: dark ? '#9aa0a6' : '#eceef0', roughness: 0.6 }));
+      stand.position.set(center[0], tableY + h / 2, center[2]); stand.castShadow = stand.receiveShadow = true; group('base').add(stand);
+    }
+    const blob = new T.Mesh(new T.PlaneGeometry(w * 1.9, d * 1.9), new T.MeshBasicMaterial({ map: softDisc, transparent: true, depthWrite: false, opacity: dark ? 0.8 : 0.55 }));
+    blob.rotation.x = -Math.PI / 2; blob.position.set(center[0], tableY + 0.01, center[2]); group('base').add(blob);
+  }
+
+  // ---- 코일: 검은 틀에 구리선을 감은 고리, 받침 기둥 ----
+  const coilFrame = new T.MeshPhysicalMaterial({ color: '#36383c', roughness: 0.4, clearcoat: 0.25 });
+  const copper = new T.MeshStandardMaterial({ color: '#c47a45', metalness: 1, roughness: 0.32, bumpMap: windings, bumpScale: 0.8 });
+  const coilBases = [];
+  function coil(cw, R, tableY) {
+    const g = new T.Group(); g.position.set(...cw); g.rotation.z = -Math.PI / 2;
+    const wire = [], k = 0.18;
+    [[R - 0.75, -0.55], [R + 0.75 - k, -0.55], [R + 0.75, -0.55 + k], [R + 0.75, 0.55 - k], [R + 0.75 - k, 0.55], [R - 0.75, 0.55]].forEach(([r, y]) => wire.push(new T.Vector2(r, y)));
+    const w = new T.Mesh(new T.LatheGeometry(wire, 160), copper); w.castShadow = true; g.add(w);
+    for (const y of [-0.68, 0.68]) {
+      const f = new T.Mesh(new T.LatheGeometry([new T.Vector2(R - 0.9, y - 0.08), new T.Vector2(R + 0.95, y - 0.08), new T.Vector2(R + 0.95, y + 0.08), new T.Vector2(R - 0.9, y + 0.08), new T.Vector2(R - 0.9, y - 0.08)], 160), coilFrame);
+      f.castShadow = true; g.add(f);
+    }
+    const core = new T.Mesh(new T.CylinderGeometry(R - 0.8, R - 0.8, 1.45, 160, 1, true), coilFrame); g.add(core);
+    group('coil').add(g);
+    const yb = cw[1] - R - 0.95, ph = Math.max(0.5, yb - tableY - 1.2), post = new T.Mesh(new RoundedBoxGeometry(1.4, ph, 1.8, 2, 0.15), coilFrame);
+    post.position.set(cw[0], tableY + 1.2 + ph / 2, cw[2]); post.castShadow = true; group('coil').add(post);
+    coilBases.push(cw);
+    if (coilBases.length === 2) {
+      const [a, b] = coilBases, len = Math.abs(b[0] - a[0]) + 6;
+      const rail = new T.Mesh(new RoundedBoxGeometry(len, 1.2, 5, 2, 0.2), new T.MeshStandardMaterial({ color: '#2a2b2e', metalness: 0.5, roughness: 0.45 }));
+      rail.position.set((a[0] + b[0]) / 2, tableY + 0.6, a[2]); rail.castShadow = rail.receiveShadow = true; group('coil').add(rail);
+    }
+  }
+
+  // ---- 센서: 둥근 모서리의 무선 센서 몸체, 구멍에 꽂히는 끝, 재는 자리 표시 ----
+  const sensorBody = new T.MeshPhysicalMaterial({ color: '#2b2d31', roughness: 0.5, clearcoat: 0.15, clearcoatRoughness: 0.6 });
+  const sensorTip = new T.MeshStandardMaterial({ color: '#8f959c', roughness: 0.45 });
+  const sensorMark = new T.MeshStandardMaterial({ color: '#f4f4f2', roughness: 0.6 });
+  const sensorLed = new T.MeshStandardMaterial({ color: '#39c46b', emissive: '#39c46b', emissiveIntensity: 1.4 });
+  const sensorMeshes = [];
+  function sensor(s) {
+    const body = new T.Mesh(new RoundedBoxGeometry(s.dims[0], s.dims[1], s.dims[2], 4, 0.28), sensorBody.clone());
+    body.position.set(...s.body); body.castShadow = body.receiveShadow = true; group('base').add(body);
+    const parts = []; sensorMeshes.push({ body, parts, box: new T.Box3().setFromObject(body).expandByScalar(0.1) });
+    if (!s.n) return;
+    const n = new T.Vector3(...s.n), half = s.dims[s.ax] / 2;
+    const tipLen = Math.max(0.05, Math.abs(s.c[s.ax] - s.face[s.ax]) + 0.02);
+    const tip = new T.Mesh(new T.CylinderGeometry(0.3, 0.3, tipLen, 32), sensorTip);
+    tip.quaternion.setFromUnitVectors(new T.Vector3(0, 1, 0), n);
+    tip.position.set(...V3.add(s.face, V3.mul(s.n, -tipLen / 2 + 0.01))); group('base').add(tip); parts.push(tip);
+    const out = V3.add(s.face, V3.mul(s.n, 2 * half + 0.004));
+    const ring = new T.Mesh(new T.RingGeometry(0.2, 0.27, 40), sensorMark), dot = new T.Mesh(new T.CircleGeometry(0.07, 24), sensorMark);
+    for (const m of [ring, dot]) { m.quaternion.setFromUnitVectors(new T.Vector3(0, 0, 1), n); m.position.set(...out); group('base').add(m); parts.push(m); }
+    const led = new T.Mesh(new T.SphereGeometry(0.07, 16, 12), sensorLed);
+    const side = [0, 1, 2].filter(j => j !== s.ax);
+    const lp = out.slice(); lp[side[0]] += s.dims[side[0]] * 0.32; lp[side[1]] += s.dims[side[1]] * 0.36; led.position.set(...lp); group('base').add(led); parts.push(led);
+  }
+
+  const B = buildScene({ mesh, lines: () => {}, ground, coil, sensor });
+  const { labels, center, diag, VIEWS, focus, fview } = B;
+
+  // ---- 빛: 방 환경 반사 + 위쪽 앞에서 비추는 주 조명(부드러운 그림자) + 뒤쪽 윤곽 조명 ----
+  const key = new T.DirectionalLight('#fff6ea', dark ? 1.4 : 1.7);
+  key.position.set(center[0] - 16, center[1] + 34, center[2] + 22); key.target.position.set(...center);
+  key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.bias = -0.0004; key.shadow.normalBias = 0.02;
+  Object.assign(key.shadow.camera, { left: -26, right: 26, top: 26, bottom: -26, near: 5, far: 110 }); key.shadow.radius = 4;
+  scene.add(key, key.target);
+  const rim = new T.DirectionalLight('#dfe8ff', dark ? 0.7 : 0.9); rim.position.set(center[0] + 20, center[1] + 12, center[2] - 26); scene.add(rim);
+  scene.add(new T.HemisphereLight('#ffffff', dark ? '#202124' : '#a9a49b', dark ? 0.12 : 0.15));
+
+  // ---- 카메라와 손으로 돌리기 ----
+  const camera = new T.PerspectiveCamera(32, 1, 0.3, 800);
+  const controls = new OrbitControls(camera, canvas);
+  Object.assign(controls, { enableDamping: true, dampingFactor: 0.09, rotateSpeed: 0.75, zoomSpeed: 0.9, panSpeed: 0.8, screenSpacePanning: true,
+    minDistance: diag * 0.12, maxDistance: diag * 7, maxPolarAngle: Math.PI / 2 - 0.015 });
+  const place = (yaw, pitch, dist, tg) => {
+    controls.target.set(...tg);
+    camera.position.set(tg[0] + dist * Math.cos(pitch) * Math.sin(yaw), tg[1] + dist * Math.sin(pitch), tg[2] + dist * Math.cos(pitch) * Math.cos(yaw));
+  };
+  const now = () => { const v = camera.position.clone().sub(controls.target), d = v.length(); return [Math.atan2(v.x, v.z), Math.asin(Math.max(-1, Math.min(1, v.y / d))), d, controls.target.toArray()]; };
+  let tween = null;
+  const go = (yaw, pitch, dist, tg) => {
+    const [y0, p0, d0, t0] = now(); let dy = yaw - y0; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+    tween = { t: performance.now(), dur: 650, f: s => place(y0 + dy * s, p0 + (pitch - p0) * s, d0 * Math.pow(dist / d0, s), t0.map((v, i) => v + (tg[i] - v) * s)) };
+  };
+  place(VIEWS.iso[0], VIEWS.iso[1], diag * 2.1, center); controls.update();
+
+  // ---- 이름표 ----
+  const labDiv = document.getElementById('labels');
+  labels.forEach(l => { const el = document.createElement('div'); el.className = 'lb' + (l.key ? ' key' : '') + (l.below ? ' below' : ''); el.innerHTML = l.html; if (l.color) el.style.color = l.color; labDiv.appendChild(el); l.el = el; });
+  const show = { box: true, coil: false, truth: true, alt: true, lab: true, hose: true, base: true };
+  const apply = () => Object.entries(groups).forEach(([k, g]) => { g.visible = show[k] !== false; });
+  const pv = new T.Vector3();
+
+  let cw = 1, ch = 1;
+  function resize() {
+    cw = canvas.clientWidth || 1; ch = canvas.clientHeight || 1;
+    renderer.setSize(cw, ch, false); camera.aspect = cw / ch; camera.updateProjectionMatrix(); need = true;
+  }
+  const ray = new T.Ray(), hit = new T.Vector3();
+  function render() {
+    const d = camera.position.distanceTo(controls.target);
+    // 센서 몸체가 보는 곳을 가리면 흐리게 한다
+    ray.origin.copy(camera.position); ray.direction.copy(controls.target).sub(camera.position).normalize();
+    sensorMeshes.forEach(m => {
+      const block = !!ray.intersectBox(m.box, hit) && hit.distanceTo(camera.position) < d - 0.3 && !m.box.containsPoint(controls.target);
+      if (block === !!m.faded) return;
+      m.faded = block; const mt = m.body.material;
+      mt.transparent = block; mt.opacity = block ? 0.18 : 1; mt.depthWrite = !block; mt.needsUpdate = true;
+      m.body.castShadow = !block; m.parts.forEach(p => { p.visible = !block; });
+    });
+    scene.fog.near = d * 1.6; scene.fog.far = d * 5;
+    renderer.render(scene, camera);
+    const placed = [];
+    labels.forEach(l => {
+      pv.set(...l.p).project(camera);
+      const on = show.lab && pv.z < 1 && (l.group !== 'coil' || show.coil) && (l.group !== 'truth' || show.truth);
+      l.el.style.display = on ? '' : 'none'; if (!on) return;
+      const x = (pv.x + 1) / 2 * cw, y = (1 - pv.y) / 2 * ch;
+      if (!l.w) { l.w = l.el.offsetWidth; l.h = l.el.offsetHeight; }
+      let lift = 0;            // 다른 이름표와 겹치면 끈을 늘여 비켜 놓는다 (위에 다는 것은 위로, 아래에 다는 것은 아래로)
+      const body = () => l.below ? [y + 12 + lift, y + 12 + lift + l.h] : [y - 12 - lift - l.h, y - 12 - lift];
+      for (let n = 0; n < 6; n++) {
+        const [t0, t1] = body(), hit = placed.find(r => Math.abs(r.x - x) < (r.w + l.w) / 2 + 3 && t0 < r.bottom + 2 && t1 + 2 > r.top);
+        if (!hit) break; lift += l.below ? hit.bottom + 3 - t0 : t1 - (hit.top - 3);
+      }
+      const [t0, t1] = body(); placed.push({ x, w: l.w, top: l.below ? y : t0, bottom: l.below ? t1 : y });
+      l.el.style.left = x.toFixed(1) + 'px'; l.el.style.top = y.toFixed(1) + 'px'; l.el.style.setProperty('--lift', lift.toFixed(0) + 'px');
+    });
+  }
+  let need = true, running = true;
+  controls.addEventListener('change', () => { need = true; });
+  function frame(t) {
+    if (tween) { const s = Math.min(1, (t - tween.t) / tween.dur); tween.f(s < 0.5 ? 4 * s * s * s : 1 - Math.pow(-2 * s + 2, 3) / 2); if (s >= 1) tween = null; need = true; }
+    if (controls.update()) need = true;
+    if (need) { render(); need = false; }
+    if (running) requestAnimationFrame(frame);
+  }
+  apply(); resize();
+  new ResizeObserver(resize).observe(canvas);
+  document.addEventListener('visibilitychange', () => { const was = running; running = !document.hidden; if (running && !was) requestAnimationFrame(frame); });
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  requestAnimationFrame(frame);
+
+  document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { const v = VIEWS[b.dataset.v]; go(v[0], Math.min(v[1], Math.PI / 2 - 0.02), diag * 2.1, center); });
+  document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { const f = b.dataset.f, v = fview[f]; go(v[0], v[1], v[2], focus[f]); });
+  const tg = (id, k) => document.getElementById(id).onchange = e => { show[k] = e.target.checked; apply(); need = true; };
+  tg('tBox', 'box'); tg('tCoil', 'coil'); tg('tTruth', 'truth'); tg('tAlt', 'alt'); tg('tLab', 'lab');
+  if (!D.truth && !D.truth_points) document.getElementById('tTruth').parentElement.style.display = 'none';
+  if (!D.alt.length) document.getElementById('tAlt').parentElement.style.display = 'none';
+  window.__ready3d = true;
+}
+
+// ---------- 3D 시작: three.js를 불러오면 실제처럼, 못 불러오면 예전 방식, WebGL이 없으면 선 그림 ----------
+{
+  const wait = document.getElementById('nogl'); wait.hidden = false; wait.textContent = '3D 불러오는 중';
+  loadThree().then(m => {
+    wait.hidden = true;
+    try { startThree(m); } catch (e) { console.error(e); startFallback(); }
+  }, e => { console.warn(e); wait.hidden = true; start3D(); });
 }
 
 // ---------- WebGL을 못 쓸 때: 간단한 선 그림 ----------
