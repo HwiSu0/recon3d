@@ -95,7 +95,7 @@ td.num{font-variant-numeric:tabular-nums}
         <span class="grp"><button data-v="iso">기본</button><button data-v="top">위</button><button data-v="front">앞</button><button data-v="side">입구 쪽</button><button data-v="out">출구 쪽</button></span>
         <span class="grp"><button data-f="J">분기점</button><button data-f="in">입구</button><button data-f="out">출구</button></span>
         <label><input type="checkbox" id="tBox" checked>상자</label>
-        <label><input type="checkbox" id="tCoil">코일</label>
+        <label><input type="checkbox" id="tCoil" checked>장치</label>
         <label><input type="checkbox" id="tTruth" checked>실제 경로</label>
         <label><input type="checkbox" id="tAlt" checked>다른 후보</label>
         <label><input type="checkbox" id="tLab" checked>이름표</label>
@@ -393,7 +393,7 @@ function buildScene(api) {
   faces.forEach(f => {
     const iu = (f.k + 1) % 3, iv = (f.k + 2) % 3;
     const hs = holesW.filter(p => Math.abs(p[f.k] - (f.k0 + f.k1) / 2) < wT * 1.5).map(p => ({ u: p[iu], v: p[iv], r: holeR }));
-    sensors.forEach(s => { if (s.n && s.ax === f.k && s.n[f.k] === f.s) hs.push({ u: s.c[iu], v: s.c[iv], r: 0.36 }); });
+    sensors.forEach(s => { if (s.n && s.ax === f.k && s.n[f.k] === f.s) hs.push({ u: s.c[iu], v: s.c[iv], r: api.probe ? 0.6 : 0.36 }); });
     const [o, rim] = wall(f.k, f.k0, f.k1, lo, hi, hs, 0.1);
     addMesh(o, { kind: 'acrylic', col: [0.82, 0.92, 1.0], alpha: 0.10, fres: 0.55, spec: 0.9, shin: 120, transparent: true }, 'box');
     addMesh(rim, { kind: 'acrylicRim', col: [0.75, 0.88, 1.0], alpha: 0.32, fres: 0.4, spec: 0.8, shin: 90, transparent: true }, 'box');
@@ -424,10 +424,19 @@ function buildScene(api) {
     return [0, 1, 2].map(j => s * s * s * a[j] + 3 * s * s * t * b[j] + 3 * s * t * t * c[j] + t * t * t * d[j]); });
   // 상자 밖 호스: 입구 쪽은 위에 있는 주사기에서 내려오고, 출구 쪽은 탁자로 늘어져 메스실린더로 간다
   const inTail = () => {
+    if (api.rig) {     // 위에 매단 주사기에서 내려온다
+      const top = V3.add(V3.add(inletW, V3.mul(upD, 10)), [0, 18, 0]);
+      return bez(top, V3.add(V3.add(inletW, V3.mul(upD, 8)), [0, 2, 0]), V3.add(inletW, V3.mul(upD, 3)), inletW, 24).slice(0, -1);
+    }
     const far = V3.add(V3.add(inletW, V3.mul(upD, 7)), [0, 3.5, 0]);
     return bez(far, V3.add(V3.add(inletW, V3.mul(upD, 5)), [0, 0.6, 0]), V3.add(inletW, V3.mul(upD, 2.2)), inletW, 16).slice(0, -1);
   };
   const outTail = o => {
+    if (api.cylinder) {      // 출구 호스는 받침 옆 메스실린더 안으로 들어간다
+      const h = 12, cx = V3.add(o, V3.mul(outD, 10.5)), top = tableY + 0.5 + h;
+      api.cylinder([cx[0], tableY, cx[2]], h);
+      return [...bez(o, V3.add(o, V3.mul(outD, 5)), [cx[0] - outD[0] * 1.6, top + 2.4, cx[2]], [cx[0], top + 0.4, cx[2]], 20).slice(1), [cx[0], top - 1.5, cx[2]], [cx[0], tableY + 3, cx[2]]];
+    }
     const g = tableY + rOut(hoseMM.stem) + 0.02, at = (s, y) => { const p = V3.add(o, V3.mul(outD, s)); return [p[0], y === undefined ? p[1] : y, p[2]]; };
     const drop = Math.max(2.5, Math.min(9, (o[1] - g) * 0.8));
     return [...bez(o, at(3.2), at(drop - 1.5, g), at(drop + 1.5, g), 18).slice(1), at(Math.max(Lout, drop + 3), g)];
@@ -551,13 +560,14 @@ function buildScene(api) {
     addLabel(V3.add(W(o), V3.mul(outD, 1.5)), `${(D.all_outlet_names || [])[k] || '출구' + (k + 1)} (안 씀)`, css('--muted'), false, 'lab', true); });
   // 센서
   sensors.forEach(s => {
-    if (api.sensor) api.sensor(s);
+    let at = null;
+    if (api.sensor) at = api.sensor(s);
     else {
       const h = V3.mul(s.dims, 0.5);
       addMesh(boxM(V3.sub(s.body, h), V3.add(s.body, h)), { col: [0.20, 0.20, 0.23], spec: 0.5, shin: 60 }, 'base');
       addMesh(sphere(s.n ? V3.add(s.body, V3.mul(s.n, s.dims[s.ax] / 2 + 0.05)) : V3.add(s.body, [0, h[1] + 0.05, 0]), 0.16, 12), { col: [0.85, 0.15, 0.15], spec: 0.6, shin: 60, emis: 0.2 }, 'base');
     }
-    addLabel(s.n ? V3.add(s.body, V3.mul(s.n, s.dims[s.ax] / 2)) : s.body, s.k, css('--sensor'), true);
+    addLabel(at || (s.n ? V3.add(s.body, V3.mul(s.n, s.dims[s.ax] / 2)) : s.body), s.k, css('--sensor'), true);
   });
 
   const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
@@ -620,7 +630,7 @@ function start3D() {
 
   // ---------- 카메라 ----------
   let yaw = VIEWS.iso[0], pitch = VIEWS.iso[1], dist = diag * 1.9, target = center.slice();
-  const show = { box: true, coil: false, truth: true, alt: true, lab: true, hose: true, base: true };
+  const show = { box: true, coil: document.getElementById('tCoil').checked, truth: true, alt: true, lab: true, hose: true, base: true };
   function persp(fy, asp, n, f) { const t = 1 / Math.tan(fy / 2), nf = 1 / (n - f); return [t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) * nf, -1, 0, 0, 2 * f * n * nf, 0]; }
   function lookAt(e, c, up) {
     const z = V3.norm(V3.sub(e, c)), x = V3.norm(V3.cross(up, z)), y = V3.cross(z, x);
@@ -796,76 +806,139 @@ function startThree({ T, OrbitControls, RoomEnvironment, RoundedBoxGeometry }) {
     }
   }
 
-  // ---- 탁자, 받침대, 접지 그림자 ----
+  // ---- 실제 장치 (사진 기준): 눈금 있는 검은 코일 받침, 흰 받침대, 스탠드와 빨간 집게, 흰 무선 센서와 회색 탐침, 검은 충전선, 메스실린더 ----
+  const rigMat = {
+    black: new T.MeshPhysicalMaterial({ color: '#1c1d20', roughness: 0.5, clearcoat: 0.2, clearcoatRoughness: 0.5 }),
+    steel: new T.MeshStandardMaterial({ color: '#c9ccce', metalness: 1, roughness: 0.28 }),
+    red: new T.MeshPhysicalMaterial({ color: '#e0432b', roughness: 0.55, clearcoat: 0.3 }),
+    white: new T.MeshPhysicalMaterial({ color: '#f2f2ef', roughness: 0.42, clearcoat: 0.25, clearcoatRoughness: 0.4 }),
+    probe: new T.MeshStandardMaterial({ color: '#8b9095', roughness: 0.45 }),
+    port: new T.MeshStandardMaterial({ color: '#3a3c40', roughness: 0.6 }),
+    cable: new T.MeshStandardMaterial({ color: '#141516', roughness: 0.55 }),
+    riser: new T.MeshStandardMaterial({ color: dark ? '#b9bcbf' : '#f4f5f6', roughness: 0.7 }),
+    glass: new T.MeshPhysicalMaterial({ color: '#e9f1f1', roughness: 0.05, transparent: true, opacity: 0.12, depthWrite: false }),
+    fill: new T.MeshPhysicalMaterial({ color: '#4a3524', roughness: 0.35, clearcoat: 0.6, transparent: true, opacity: 0.92 }),
+  };
+  const rigAdd = (o, shadow = true) => { if (shadow) { o.castShadow = true; o.receiveShadow = true; } group('coil').add(o); return o; };
+  const vec = a => new T.Vector3(...a);
+  function rod(a, b, r, mat, grp = 'coil') {          // 두 점 사이 원기둥
+    const A = vec(a), Bv = vec(b), L = A.distanceTo(Bv), m = new T.Mesh(new T.CylinderGeometry(r, r, L, 24), mat);
+    m.position.copy(A).add(Bv).multiplyScalar(0.5); m.quaternion.setFromUnitVectors(new T.Vector3(0, 1, 0), Bv.clone().sub(A).normalize());
+    m.castShadow = m.receiveShadow = true; group(grp).add(m); return m;
+  }
+  const ticks = canvasTex(1024, 64, (g, w, h) => {
+    g.fillStyle = '#1c1d20'; g.fillRect(0, 0, w, h); g.fillStyle = '#e8e8e4';
+    for (let i = 0; i <= 100; i++) { const x = 12 + i * (w - 24) / 100, len = i % 10 === 0 ? 26 : i % 5 === 0 ? 18 : 11; g.fillRect(Math.round(x), 8, i % 10 === 0 ? 3 : 2, len); }
+  });
+  ticks.colorSpace = T.SRGBColorSpace; ticks.wrapS = ticks.wrapT = T.ClampToEdgeWrapping;
+  const glassAdd = (geo, grp = 'coil') => { const g = new T.Mesh(geo, rigMat.glass), r = new T.Mesh(geo, glare); r.renderOrder = 2; group(grp).add(g); group(grp).add(r); return [g, r]; };
+  let stands = [], baseTop = 0, boxC = [0, 0, 0];
+
   function ground({ center, lo, hi, tableY }) {
-    const top = new T.Mesh(new T.PlaneGeometry(600, 600), new T.MeshStandardMaterial({ color: dark ? '#2e3135' : '#8f9397', roughness: 0.8, map: speckle }));
+    const top = new T.Mesh(new T.PlaneGeometry(600, 600), new T.MeshStandardMaterial({ color: dark ? '#34373b' : '#d3d6d7', roughness: 0.75, map: speckle }));
     top.rotation.x = -Math.PI / 2; top.position.set(center[0], tableY, center[2]); top.receiveShadow = true; group('base').add(top);
-    const w = hi[0] - lo[0] - 1.2, d = hi[2] - lo[2] - 1.2, h = lo[1] - tableY - 0.02;
-    if (h > 1) {
-      const stand = new T.Mesh(new RoundedBoxGeometry(w, h, d, 3, 0.25), new T.MeshStandardMaterial({ color: dark ? '#9aa0a6' : '#eceef0', roughness: 0.6 }));
-      stand.position.set(center[0], tableY + h / 2, center[2]); stand.castShadow = stand.receiveShadow = true; group('base').add(stand);
+    const coils = (G.coils || []).map(c => W([c.a, ...(G.coil_axis_bc || [4, 16.5])]));
+    const zc = coils.length ? coils[0][2] : center[2];
+    // 코일 받침: 앞면에 흰 눈금
+    if (coils.length) {
+      const x0 = Math.min(...coils.map(c => c[0])) - 5, x1 = Math.max(...coils.map(c => c[0])) + 5, H = Math.min(4.5, lo[1] - tableY - 2);
+      baseTop = tableY + H;
+      const mats = [rigMat.black, rigMat.black, rigMat.black, rigMat.black, new T.MeshStandardMaterial({ map: ticks, roughness: 0.55 }), rigMat.black];
+      const base = new T.Mesh(new T.BoxGeometry(x1 - x0, H, 13), mats); base.position.set((x0 + x1) / 2, tableY + H / 2, zc); rigAdd(base);
+      const shade = new T.Mesh(new T.PlaneGeometry((x1 - x0) * 1.15, 18), new T.MeshBasicMaterial({ map: softDisc, transparent: true, depthWrite: false, opacity: dark ? 0.7 : 0.5 }));
+      shade.rotation.x = -Math.PI / 2; shade.position.set((x0 + x1) / 2, tableY + 0.01, zc); group('coil').add(shade);
     }
-    const blob = new T.Mesh(new T.PlaneGeometry(w * 1.9, d * 1.9), new T.MeshBasicMaterial({ map: softDisc, transparent: true, depthWrite: false, opacity: dark ? 0.8 : 0.55 }));
-    blob.rotation.x = -Math.PI / 2; blob.position.set(center[0], tableY + 0.01, center[2]); group('base').add(blob);
+    // 상자를 받치는 흰 받침대
+    const w = hi[0] - lo[0] - 1.2, d = hi[2] - lo[2] - 1.2; boxC = center;
+    const mkRiser = (from, grp) => {
+      const h = lo[1] - from - 0.02; if (h < 0.5) return;
+      const r = new T.Mesh(new RoundedBoxGeometry(w, h, d, 3, 0.2), rigMat.riser); r.position.set(center[0], from + h / 2, center[2]);
+      r.castShadow = r.receiveShadow = true; group(grp).add(r);
+    };
+    if (baseTop) { mkRiser(baseTop, 'coil'); mkRiser(tableY, 'nocoil'); } else mkRiser(tableY, 'base');
+    // 스탠드 두 개: 앞 왼쪽, 뒤 오른쪽
+    const xs = coils.length ? [Math.min(...coils.map(c => c[0])) - 7, Math.max(...coils.map(c => c[0])) + 14] : [lo[0] - 7, hi[0] + 14];
+    stands = [[xs[0], lo[2] < hi[2] ? hi[2] + 11 : lo[2] + 11], [xs[1], lo[2] - 3]];
+    stands.forEach(([x, z]) => {
+      rod([x, tableY, z], [x, tableY + 44, z], 0.6, rigMat.steel);
+      const plate = new T.Mesh(new RoundedBoxGeometry(9, 1.2, 14, 2, 0.3), rigMat.black); plate.position.set(x, tableY + 0.6, z + (z > center[2] ? 3 : -3)); rigAdd(plate);
+    });
   }
 
-  // ---- 코일: 검은 틀에 구리선을 감은 고리, 받침 기둥 ----
-  const coilFrame = new T.MeshPhysicalMaterial({ color: '#36383c', roughness: 0.4, clearcoat: 0.25 });
-  const copper = new T.MeshStandardMaterial({ color: '#c47a45', metalness: 1, roughness: 0.32, bumpMap: windings, bumpScale: 0.8 });
-  const coilBases = [];
+  // 코일: 검은 고리 틀 안쪽에 은빛으로 보이는 감은 선, 바깥쪽 손잡이, 받침에 꽂히는 발
+  const coilParts = [];
   function coil(cw, R, tableY) {
+    const frame = rigMat.black.clone(), wire = new T.MeshStandardMaterial({ color: '#a9a49b', metalness: 1, roughness: 0.3, bumpMap: windings, bumpScale: 0.7 });
     const g = new T.Group(); g.position.set(...cw); g.rotation.z = -Math.PI / 2;
-    const wire = [], k = 0.18;
-    [[R - 0.75, -0.55], [R + 0.75 - k, -0.55], [R + 0.75, -0.55 + k], [R + 0.75, 0.55 - k], [R + 0.75 - k, 0.55], [R - 0.75, 0.55]].forEach(([r, y]) => wire.push(new T.Vector2(r, y)));
-    const w = new T.Mesh(new T.LatheGeometry(wire, 160), copper); w.castShadow = true; g.add(w);
-    for (const y of [-0.68, 0.68]) {
-      const f = new T.Mesh(new T.LatheGeometry([new T.Vector2(R - 0.9, y - 0.08), new T.Vector2(R + 0.95, y - 0.08), new T.Vector2(R + 0.95, y + 0.08), new T.Vector2(R - 0.9, y + 0.08), new T.Vector2(R - 0.9, y - 0.08)], 160), coilFrame);
-      f.castShadow = true; g.add(f);
+    const ring = (r0, r1, y0, y1, mat) => { const m = new T.Mesh(new T.LatheGeometry([new T.Vector2(r0, y0), new T.Vector2(r1, y0), new T.Vector2(r1, y1), new T.Vector2(r0, y1), new T.Vector2(r0, y0)], 180), mat); m.castShadow = m.receiveShadow = true; g.add(m); };
+    ring(R - 0.55, R + 0.55, -0.85, 0.85, wire);                 // 감은 선
+    ring(R - 1.7, R + 0.75, -1.05, -0.85, frame);                // 두 옆판
+    ring(R - 1.7, R + 0.75, 0.85, 1.05, frame);
+    ring(R - 1.7, R - 0.55, -0.85, 0.85, frame);                 // 안쪽 몸통
+    const side = cw[0] > boxC[0] ? -1 : 1;                      // 상자 반대쪽 옆판의 손잡이
+    for (let i = 0; i < 4; i++) {
+      const th = Math.PI / 4 + i * Math.PI / 2, k = new T.Mesh(new T.CylinderGeometry(0.42, 0.42, 0.9, 20), frame);
+      k.position.set((R - 1.1) * Math.cos(th), side * 1.45, (R - 1.1) * Math.sin(th)); k.castShadow = true; g.add(k);
     }
-    const core = new T.Mesh(new T.CylinderGeometry(R - 0.8, R - 0.8, 1.45, 160, 1, true), coilFrame); g.add(core);
     group('coil').add(g);
-    const yb = cw[1] - R - 0.95, ph = Math.max(0.5, yb - tableY - 1.2), post = new T.Mesh(new RoundedBoxGeometry(1.4, ph, 1.8, 2, 0.15), coilFrame);
-    post.position.set(cw[0], tableY + 1.2 + ph / 2, cw[2]); post.castShadow = true; group('coil').add(post);
-    coilBases.push(cw);
-    if (coilBases.length === 2) {
-      const [a, b] = coilBases, len = Math.abs(b[0] - a[0]) + 6;
-      const rail = new T.Mesh(new RoundedBoxGeometry(len, 1.2, 5, 2, 0.2), new T.MeshStandardMaterial({ color: '#2a2b2e', metalness: 0.5, roughness: 0.45 }));
-      rail.position.set((a[0] + b[0]) / 2, tableY + 0.6, a[2]); rail.castShadow = rail.receiveShadow = true; group('coil').add(rail);
-    }
+    const bottom = cw[1] - R - 0.75, foot = new T.Mesh(new T.BoxGeometry(2.4, Math.max(0.4, bottom - baseTop + 0.6), 3.6), frame);
+    foot.position.set(cw[0], (bottom + 0.6 + baseTop) / 2, cw[2]); rigAdd(foot);
+    coilParts.push({ c: cw, R, mats: [frame, wire], g });
   }
 
-  // ---- 센서: 둥근 모서리의 무선 센서 몸체, 구멍에 꽂히는 끝, 재는 자리 표시 ----
-  const sensorBody = new T.MeshPhysicalMaterial({ color: '#2b2d31', roughness: 0.5, clearcoat: 0.15, clearcoatRoughness: 0.6 });
-  const sensorTip = new T.MeshStandardMaterial({ color: '#8f959c', roughness: 0.45 });
-  const sensorMark = new T.MeshStandardMaterial({ color: '#f4f4f2', roughness: 0.6 });
-  const sensorLed = new T.MeshStandardMaterial({ color: '#39c46b', emissive: '#39c46b', emissiveIntensity: 1.4 });
+  // 센서: 흰 몸체 + 회색 납작한 탐침(끝이 재는 자리). 탐침은 면에 수직으로 구멍에 꽂히고 몸체는 바깥으로
+  const PROBE = 6.0, BODY = 6.5, BW = 3.3, BT = 2.0;
   const sensorMeshes = [];
   function sensor(s) {
-    const body = new T.Mesh(new RoundedBoxGeometry(s.dims[0], s.dims[1], s.dims[2], 4, 0.28), sensorBody.clone());
-    body.position.set(...s.body); body.castShadow = body.receiveShadow = true; group('base').add(body);
-    const parts = []; sensorMeshes.push({ body, parts, box: new T.Box3().setFromObject(body).expandByScalar(0.1) });
-    if (!s.n) return;
-    const n = new T.Vector3(...s.n), half = s.dims[s.ax] / 2;
-    const tipLen = Math.max(0.05, Math.abs(s.c[s.ax] - s.face[s.ax]) + 0.02);
-    const tip = new T.Mesh(new T.CylinderGeometry(0.3, 0.3, tipLen, 32), sensorTip);
-    tip.quaternion.setFromUnitVectors(new T.Vector3(0, 1, 0), n);
-    tip.position.set(...V3.add(s.face, V3.mul(s.n, -tipLen / 2 + 0.01))); group('base').add(tip); parts.push(tip);
-    const out = V3.add(s.face, V3.mul(s.n, 2 * half + 0.004));
-    const ring = new T.Mesh(new T.RingGeometry(0.2, 0.27, 40), sensorMark), dot = new T.Mesh(new T.CircleGeometry(0.07, 24), sensorMark);
-    for (const m of [ring, dot]) { m.quaternion.setFromUnitVectors(new T.Vector3(0, 0, 1), n); m.position.set(...out); group('base').add(m); parts.push(m); }
-    const led = new T.Mesh(new T.SphereGeometry(0.07, 16, 12), sensorLed);
-    const side = [0, 1, 2].filter(j => j !== s.ax);
-    const lp = out.slice(); lp[side[0]] += s.dims[side[0]] * 0.32; lp[side[1]] += s.dims[side[1]] * 0.36; led.position.set(...lp); group('base').add(led); parts.push(led);
+    const n = s.n || [0, 1, 0], tip = s.n ? s.c : V3.sub(s.c, [0, PROBE + BODY / 2, 0]);
+    const ax = s.n ? s.ax : 1, wide = ax === 1 ? [0, 0, 1] : ax === 0 ? [0, 1, 0] : [1, 0, 0];
+    const thin = V3.cross(wide, n), basis = new T.Matrix4().makeBasis(vec(wide), vec(n), vec(thin)), q = new T.Quaternion().setFromRotationMatrix(basis);
+    const at = (k, w = 0, t = 0) => V3.add(V3.add(V3.add(tip, V3.mul(n, k)), V3.mul(wide, w)), V3.mul(thin, t));
+    const parts = [];
+    const put = (geo, mat, p, shadow = true) => { const m = new T.Mesh(geo, mat); m.quaternion.copy(q); m.position.set(...p); m.castShadow = m.receiveShadow = shadow; group('base').add(m); parts.push(m); return m; };
+    const body = put(new RoundedBoxGeometry(BW, BODY, BT, 4, 0.4), rigMat.white.clone(), at(PROBE + BODY / 2));
+    parts.pop();
+    if (s.n) put(new T.BoxGeometry(1.0, PROBE + 0.3, 0.32), rigMat.probe, at(PROBE / 2 - 0.15));
+    const disc = (r, mat, p, dir) => { const m = new T.Mesh(new T.CircleGeometry(r, 28), mat); m.quaternion.setFromUnitVectors(new T.Vector3(0, 0, 1), vec(dir)); m.position.set(...p); group('base').add(m); parts.push(m); };
+    disc(0.28, rigMat.port, at(PROBE + BODY * 0.62, 0, BT / 2 + 0.005), thin);                    // 옆면의 작은 구멍
+    disc(0.36, rigMat.port, at(PROBE + BODY + 0.005), n);                                       // 끝의 충전 구멍
+    sensorMeshes.push({ body, parts, box: new T.Box3().setFromObject(body).expandByScalar(0.1) });
+    // 검은 충전선: 끝에서 나와 탁자로
+    const e = at(PROBE + BODY), lift = V3.add(e, V3.mul(n, 2.5)), down = V3.add(V3.add(e, V3.mul(thin, 5)), [0, 0, 0]);
+    const cab = new T.CatmullRomCurve3([e, lift, [down[0], Math.max(e[1] * 0.55, 3), down[2] + 2], [down[0] + 1, 0.25, down[2] + 6]].map(vec));
+    const cm = new T.Mesh(new T.TubeGeometry(cab, 80, 0.17, 10), rigMat.cable); cm.castShadow = true; group('coil').add(cm);
+    // 빨간 집게와 스탠드까지 쇠막대
+    const cp = at(PROBE + 1.8);
+    for (const sgn of [-1, 1]) {
+      const j = new T.Mesh(new RoundedBoxGeometry(BW * 0.7, 1.6, 0.5, 2, 0.15), rigMat.red); j.quaternion.copy(q);
+      j.position.set(...V3.add(cp, V3.mul(thin, sgn * (BT / 2 + 0.25)))); rigAdd(j);
+    }
+    if (stands.length) {
+      const st = stands.reduce((b, s2) => Math.hypot(s2[0] - cp[0], s2[1] - cp[2]) < Math.hypot(b[0] - cp[0], b[1] - cp[2]) ? s2 : b);
+      const arm = V3.add(cp, V3.mul(thin, BT / 2 + 0.5)), sp = [st[0], arm[1], st[1]];
+      rod(arm, sp, 0.32, rigMat.steel);
+      const boss = new T.Mesh(new RoundedBoxGeometry(1.8, 1.8, 1.8, 2, 0.2), rigMat.black); boss.position.set(...sp); rigAdd(boss);
+    }
+    return at(PROBE + BODY * 0.5, 0, BT / 2);
   }
 
-  const B = buildScene({ mesh, lines: () => {}, ground, coil, sensor });
-  const { labels, center, diag, VIEWS, focus, fview } = B;
+  // 메스실린더: 출구 호스가 위에서 들어간다
+  function cylinder(p, h) {
+    const r = 0.85, y = p[1];
+    const tube = glassAdd(new T.CylinderGeometry(r, r, h, 40, 1, true)); tube.forEach(m => m.position.set(p[0], y + 0.5 + h / 2, p[2]));
+    const foot = glassAdd(new T.CylinderGeometry(1.7, 1.9, 0.5, 6)); foot.forEach(m => m.position.set(p[0], y + 0.25, p[2]));
+    const fill = new T.Mesh(new T.CylinderGeometry(r - 0.06, r - 0.06, h * 0.3, 32), rigMat.fill); fill.position.set(p[0], y + 0.5 + h * 0.15, p[2]); group('coil').add(fill);
+    const lip = new T.Mesh(new T.TorusGeometry(r, 0.06, 8, 40), rigMat.glass); lip.rotation.x = Math.PI / 2; lip.position.set(p[0], y + 0.5 + h, p[2]); group('coil').add(lip);
+  }
+
+  const B = buildScene({ mesh, lines: () => {}, ground, coil, sensor, cylinder, rig: true, probe: true });
+  const { labels, center, diag, focus, fview } = B, VIEWS = { ...B.VIEWS, iso: [0.32, 0.2] };
 
   // ---- 빛: 방 환경 반사 + 위쪽 앞에서 비추는 주 조명(부드러운 그림자) + 뒤쪽 윤곽 조명 ----
   const key = new T.DirectionalLight('#fff6ea', dark ? 1.4 : 1.7);
   key.position.set(center[0] - 16, center[1] + 34, center[2] + 22); key.target.position.set(...center);
-  key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.bias = -0.0004; key.shadow.normalBias = 0.02;
-  Object.assign(key.shadow.camera, { left: -26, right: 26, top: 26, bottom: -26, near: 5, far: 110 }); key.shadow.radius = 4;
+  key.castShadow = true; key.shadow.mapSize.set(3072, 3072); key.shadow.bias = -0.0004; key.shadow.normalBias = 0.02;
+  Object.assign(key.shadow.camera, { left: -36, right: 36, top: 36, bottom: -36, near: 5, far: 130 }); key.shadow.radius = 4;
   scene.add(key, key.target);
   const rim = new T.DirectionalLight('#dfe8ff', dark ? 0.7 : 0.9); rim.position.set(center[0] + 20, center[1] + 12, center[2] - 26); scene.add(rim);
   scene.add(new T.HemisphereLight('#ffffff', dark ? '#202124' : '#a9a49b', dark ? 0.12 : 0.15));
@@ -874,7 +947,7 @@ function startThree({ T, OrbitControls, RoomEnvironment, RoundedBoxGeometry }) {
   const camera = new T.PerspectiveCamera(32, 1, 0.3, 800);
   const controls = new OrbitControls(camera, canvas);
   Object.assign(controls, { enableDamping: true, dampingFactor: 0.09, rotateSpeed: 0.75, zoomSpeed: 0.9, panSpeed: 0.8, screenSpacePanning: true,
-    minDistance: diag * 0.12, maxDistance: diag * 7, maxPolarAngle: Math.PI / 2 - 0.015 });
+    minDistance: diag * 0.12, maxDistance: diag * 9, maxPolarAngle: Math.PI / 2 - 0.015 });
   const place = (yaw, pitch, dist, tg) => {
     controls.target.set(...tg);
     camera.position.set(tg[0] + dist * Math.cos(pitch) * Math.sin(yaw), tg[1] + dist * Math.sin(pitch), tg[2] + dist * Math.cos(pitch) * Math.cos(yaw));
@@ -885,13 +958,14 @@ function startThree({ T, OrbitControls, RoomEnvironment, RoundedBoxGeometry }) {
     const [y0, p0, d0, t0] = now(); let dy = yaw - y0; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
     tween = { t: performance.now(), dur: 650, f: s => place(y0 + dy * s, p0 + (pitch - p0) * s, d0 * Math.pow(dist / d0, s), t0.map((v, i) => v + (tg[i] - v) * s)) };
   };
-  place(VIEWS.iso[0], VIEWS.iso[1], diag * 2.1, center); controls.update();
+  const home = diag * 3.7;
+  place(VIEWS.iso[0], VIEWS.iso[1], home, center); controls.update();
 
   // ---- 이름표 ----
   const labDiv = document.getElementById('labels');
   labels.forEach(l => { const el = document.createElement('div'); el.className = 'lb' + (l.key ? ' key' : '') + (l.below ? ' below' : ''); el.innerHTML = l.html; if (l.color) el.style.color = l.color; labDiv.appendChild(el); l.el = el; });
-  const show = { box: true, coil: false, truth: true, alt: true, lab: true, hose: true, base: true };
-  const apply = () => Object.entries(groups).forEach(([k, g]) => { g.visible = show[k] !== false; });
+  const show = { box: true, coil: true, truth: true, alt: true, lab: true, hose: true, base: true };
+  const apply = () => Object.entries(groups).forEach(([k, g]) => { g.visible = k === 'nocoil' ? !show.coil : show[k] !== false; });
   const pv = new T.Vector3();
 
   let cw = 1, ch = 1;
@@ -910,6 +984,16 @@ function startThree({ T, OrbitControls, RoomEnvironment, RoundedBoxGeometry }) {
       m.faded = block; const mt = m.body.material;
       mt.transparent = block; mt.opacity = block ? 0.18 : 1; mt.depthWrite = !block; mt.needsUpdate = true;
       m.body.castShadow = !block; m.parts.forEach(p => { p.visible = !block; });
+    });
+    // 코일 고리가 보는 곳을 가리면 흐리게 한다
+    coilParts.forEach(c => {
+      let block = false;
+      if (show.coil && Math.abs(ray.direction.x) > 1e-6) {
+        const t = (c.c[0] - ray.origin.x) / ray.direction.x;
+        if (t > 0 && t < d - 0.3) { const y = ray.origin.y + t * ray.direction.y - c.c[1], z = ray.origin.z + t * ray.direction.z - c.c[2], r = Math.hypot(y, z); block = r > c.R - 2.2 && r < c.R + 1.6; }
+      }
+      if (block === !!c.faded) return;
+      c.faded = block; c.mats.forEach(mt => { mt.transparent = block; mt.opacity = block ? 0.15 : 1; mt.depthWrite = !block; mt.needsUpdate = true; });
     });
     scene.fog.near = d * 1.6; scene.fog.far = d * 5;
     renderer.render(scene, camera);
@@ -944,7 +1028,7 @@ function startThree({ T, OrbitControls, RoomEnvironment, RoundedBoxGeometry }) {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
   requestAnimationFrame(frame);
 
-  document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { const v = VIEWS[b.dataset.v]; go(v[0], Math.min(v[1], Math.PI / 2 - 0.02), diag * 2.1, center); });
+  document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { const v = VIEWS[b.dataset.v]; go(v[0], Math.min(v[1], Math.PI / 2 - 0.02), home, center); });
   document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { const f = b.dataset.f, v = fview[f]; go(v[0], v[1], v[2], focus[f]); });
   const tg = (id, k) => document.getElementById(id).onchange = e => { show[k] = e.target.checked; apply(); need = true; };
   tg('tBox', 'box'); tg('tCoil', 'coil'); tg('tTruth', 'truth'); tg('tAlt', 'alt'); tg('tLab', 'lab');

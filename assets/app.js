@@ -289,7 +289,7 @@ function fillSensors() {
 function setFlow(k, v) {
   const c = state.cfg;
   const flows = c.outlets.map((_, i) => (c.flow_mL_s && c.flow_mL_s[i] !== undefined ? c.flow_mL_s[i] : null));
-  flows[k] = v;
+  flows[k] = v === 0 ? null : v;      // 0은 그 출구를 안 쓴 것: 비운 것과 같다
   if (flows.some(q => q !== null)) c.flow_mL_s = flows; else delete c.flow_mL_s;
 }
 
@@ -328,7 +328,7 @@ function fillFlows() {
     const label = document.createElement('label');
     label.append(c.outlet_names[k]);
     const flow = numInput(c.flow_mL_s ? c.flow_mL_s[k] : null, `${c.outlet_names[k]} 유량`, v => setFlow(k, v));
-    flow.min = '0'; flow.placeholder = '모름';
+    flow.min = '0'; flow.placeholder = '비움';
     label.append(flow);
     return label;
   }));
@@ -460,7 +460,7 @@ function checkConfig() {
   if (!coord(c.inlet)) out.push('입구 좌표 입력');
   c.outlets.forEach((p, k) => { if (!coord(p)) out.push(`출구 ${k + 1} 좌표 입력`); });
   if ((c.hose_mm && !(c.hose_mm.stem > 0)) || $('fBranches').dataset.bad) out.push('호스 내경 형식: 5 또는 3, 3');
-  if ((c.flow_mL_s || []).some(q => q !== null && !(q > 0))) out.push('유량은 0보다 커야 함');
+  if ((c.flow_mL_s || []).some(q => q !== null && !(q > 0))) out.push('유량은 0 이상이어야 함. 안 쓴 출구는 비우거나 0');
   if ((c.flow_mL_s || []).some(q => q > 5)) out.push('유량은 모은 양 ÷ 걸린 시간 (mL/s). 5 mL/s보다 크면 모은 양을 넣은 것일 수 있음');
   if (document.querySelector('[data-bad-mask]')) out.push('뺄 구간 형식: 69-999, 120-130');
   if (state.columns) {
